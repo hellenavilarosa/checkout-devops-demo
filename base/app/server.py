@@ -80,7 +80,10 @@ class Handler(BaseHTTPRequestHandler):
         start = time.time()
         status, body = 404, {"error": "not found"}
         try:
-            if self.path == "/health":
+            if self.path == "/ready":
+                # process-level readiness: the server is up and accepting connections
+                status, body = 200, {"status": "ready"}
+            elif self.path == "/health":
                 redis_cmd("PING")
                 status, body = 200, {"status": "ok", "redis": REDIS_HOST}
             elif self.path == "/checkout":

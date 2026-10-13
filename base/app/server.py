@@ -50,7 +50,7 @@ def redis_cmd(*args, timeout=1.0):
     payload = f"*{len(args)}\r\n".encode()
     for a in args:
         a = str(a).encode()
-        payload += b"%d\r\n%s\r\n" % (len(a), a)
+        payload += b"$%d\r\n%s\r\n" % (len(a), a)
     with socket.create_connection((REDIS_HOST, REDIS_PORT), timeout=timeout) as s:
         s.sendall(payload)
         data = s.recv(1024)

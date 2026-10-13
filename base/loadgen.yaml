@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: loadgen
-          image: public.ecr.aws/docker/library/alpine/curl:latest
+          image: curlimages/curl:8.10.1
           # ~5 req/s against /checkout; prints a one-line status summary per request
           command:
             - /bin/sh

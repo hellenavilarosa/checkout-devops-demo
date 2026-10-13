@@ -4,7 +4,7 @@
 
 **Mensagem central:** o DevOps Agent não é um chatbot em cima do CloudWatch. É um colega de on-call que vocês **programam** (skills, memórias, regras, agentes agendados), que **fecha o loop** (do alarme ao PR) e que **se integra ao que vocês já têm** (ArgoCD, GitHub, Slack, Kiro, MCP/A2A).
 
-Como ler este roteiro: cada passo tem **Onde** (qual aba/terminal), **Faça**, **Diga** e, quando houver, **Cole no chat** (texto pronto para o DevOps Agent ou Kiro CLI). Os tempos somam 45 min.
+Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalidade, para você), **Onde** (qual aba/terminal), **Faça**, **Diga** e, quando houver, **Cole no chat** (texto pronto para o DevOps Agent ou Kiro CLI). Os tempos somam 45 min. O Apêndice B tem um glossário de todos os conceitos em uma página, para reler antes de começar.
 
 ---
 
@@ -103,6 +103,8 @@ O alarme leva ~2–3 min (janela de 2 min + propagação dos logs). Use esse tem
 
 ### 2.2 A investigação abre sozinha (2 min) — Onde: aba A → Backlog
 
+**O que é:** uma *investigação* é a unidade de trabalho do agente para incidentes. Ela nasce de um gatilho (alarme, ticket, webhook, API ou manualmente) e passa por 3 fases: **Triage** (segundos: decide se investiga, se junta a uma investigação já aberta sobre o mesmo problema, ou se pula), **RCA** (coleta evidências em métricas, logs, mudanças recentes, topologia; pode disparar *sub-agentes* em paralelo, cada um com sua própria timeline) e **Mitigação** (propostas inline no fim da investigação). Tudo fica registrado na **Timeline** (cada passo de raciocínio e cada chamada de ferramenta) e resumido na aba **Summary**. O *Backlog* é a lista de tarefas do Agent Space — investigações, aprendizado do ambiente (`SYSTEM_LEARNING`), relatórios.
+
 **Faça:** mostrar a task `[ALARM] checkout-api-error-rate` aparecendo em *Backlog* (`PENDING_START` → `IN_PROGRESS`). Abrir. Mostrar as primeiras mensagens da timeline: leitura do alarme, hipóteses, subagentes `logs` / `argocd-change` / `propose-mitigation` partindo em paralelo.
 
 **Diga:** "Ninguém clicou em nada. O agente já está fazendo o que o on-call faz nos primeiros 5 minutos: lendo o alarme, puxando métricas, notando que o erro começou junto com um deploy. Ele leva uns 9 minutos até o plano. Enquanto ele trabalha, eu mostro como esse agente é programado — e volto pra investigação quando ela terminar."
@@ -119,7 +121,9 @@ python3 scripts/investigation-tail.py --n 8
 
 Tudo na aba A. Diga uma vez: "Agora a parte que muda a relação de vocês com a ferramenta."
 
-### 3.1 Skills em Git (4 min) — Onde: Knowledge → Skills
+### 3.1 Skills (4 min) — Onde: Knowledge → Skills
+
+**O que é:** uma *skill* é um arquivo `SKILL.md` (Markdown, formato aberto *Agent Skills*) com um cabeçalho `name` + `description` e instruções procedurais: quando usar, passos, o que não fazer. O agente lê a `description` de todas as skills e **carrega sozinho** as que forem relevantes à tarefa — por isso a description tem que dizer "use quando…". Pode ter arquivos de referência (tabelas, PDFs, diagramas) e ser restrita a um *agent type* (Triage, RCA, Mitigação, On-demand…). É o jeito de transformar runbook em comportamento. Também existem **learned skills** que o próprio agente gera ao estudar o ambiente (*Agent Space Understanding*, *Code Dependencies*, *Pipeline Topology*). Skills podem ser importadas de um repo GitHub e sincronizadas (não nesta demo).
 
 **Faça:** abrir `runbook-argocd-rollback` (pré-criada). Mostrar que é Markdown: quando aplicar, passos, o que NÃO fazer.
 
@@ -129,6 +133,8 @@ Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no bac
 
 ### 3.2 Memórias (2 min) — Onde: Knowledge → Memories
 
+**O que é:** *memória* é conhecimento **informacional** (fatos sobre o ambiente), em oposição à skill, que é **procedural** (como fazer). São arquivos Markdown agrupados em *memory stores*; o agente recebe só nomes/descrições dos stores e abre os relevantes sob demanda. Stores gerenciados pelo próprio agente: `monitors` (histórico de causas-raiz por alarme — um *Learning agent* roda 1x/dia sobre as investigações recentes), `directives` (instruções fixas que você escreve, ex.: "Lambdas não são mais usadas"), `reflections` (lições criadas automaticamente quando você marca uma investigação como errada e informa a causa real) e os de *understanding* (mapa de recursos, dependências, pipelines). Você também cria stores próprios. Cada memória é versionada. Aqui você vai adicionar uma **directive**.
+
 **Faça:** mostrar as memórias existentes. Adicionar uma ao vivo.
 
 **Cole:**
@@ -136,16 +142,30 @@ Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no bac
 
 **Diga:** "Na próxima investigação ele não redescobre isso — e não sugere `kubectl rollout undo`."
 
-### 3.3 Regras de incident-skip (2 min) — Onde: Settings → Incident rules (ou equivalente)
+### 3.3 Filtro de incidentes — skill de Triage (2 min) — Onde: Knowledge → Skills → Create
 
-**Faça:** criar ao vivo.
+**O que é:** não existe uma tela de "regras"; o filtro de ruído é uma **skill marcada com agent type *Incident Triage***. Na fase de triage (segundos após o alarme) o agente avalia essa skill e, se os critérios batem, marca o incidente como **Skipped** com a razão — sem abrir investigação. Também é assim que se ensinam regras de **correlação** (quais alarmes juntar numa só investigação). Dá para corrigir uma decisão de triage depois (unlink / reabrir), e cada skip gera um evento no EventBridge.
 
-**Cole:**
-> Não abrir investigação para o alarme checkout-api-error-rate quando ele disparar até 10 minutos após um sync do ArgoCD da Application checkout-api cuja revisão tenha a anotação canary=true.
+**Faça:** *Create skill*, agent type **Incident Triage**, nome `skip-canary-window`.
 
-**Diga:** "Vocês controlam o ruído. Deploy em janela conhecida não vira incidente."
+**Cole na description:**
+> Skip incidents from the checkout-api-error-rate alarm that fire during a planned canary rollout of the checkout-api application. Use this skill to avoid investigating expected error spikes right after a canary sync.
+
+**Cole no conteúdo:**
+> # Skip canary window
+>
+> Skip the incident only if ALL of the following are true:
+> 1. The triggering alarm is `checkout-api-error-rate`.
+> 2. An ArgoCD sync of Application `checkout-api` happened in the last 10 minutes and its revision message contains `canary=true`.
+> 3. The error rate is below 50%.
+>
+> Do NOT skip if the error rate is above 50% or if the sync message does not mention canary — a real outage must still be investigated.
+
+**Diga:** "Vocês controlam o ruído em Markdown, com a mesma mecânica dos runbooks. Deploy em janela conhecida não vira incidente — e a decisão fica registrada."
 
 ### 3.4 Custom agent agendado (3 min) — Onde: Agents → Custom agents
+
+**O que é:** um *custom agent* é um agente que **você define**: um *system prompt* em Markdown (o que faz, como, que saída produz), um conjunto de **tools** escolhido entre as ferramentas do Agent Space (AWS, integrações, seus MCP servers), **skills** e **memory stores** anexados, e um **trigger** (agendado por cron/rate, ou por evento de webhook de uma integração). Cada execução é uma *invocation* com trajetória completa (raciocínio, tool calls, saída) e pode mandar notificações em tempo real para o canal configurado (ex.: Slack). Saídas possíveis: relatório/artefato, *recommendations* no backlog, mensagens. Também pode ser definido como código (CloudFormation `AWS::DevOpsAgent::Asset` + `Trigger`, CDK, Terraform) ou importado de um repo.
 
 **Faça:** abrir `eks-daily-health` (pré-criado). Mostrar schedule e instrução. Clicar **Run now** e deixar em background.
 
@@ -159,11 +179,13 @@ python3 scripts/investigation-tail.py --n 8
 
 **Diga:** o que já apareceu ("ele já achou o ConfigMap", etc.). Se ainda não concluiu, continue no 3.6; senão pule pra Parte 4.
 
-### 3.6 Qualidade e labeling (1 min, buffer) — Onde: Quality (ou Insights)
+### 3.6 Feedback estruturado e acurácia (1 min, buffer) — Onde: aba E → investigação concluída → *Add feedback*
 
-**Faça:** mostrar o dashboard de tarefas e o labeling 👍/👎 com motivo. Rotular a investigação do ensaio.
+**O que é:** em toda investigação concluída você pode registrar **feedback estruturado**: veredito (causa raiz correta/incorreta), causa real se errou, se precisou de *steering*, se a mitigação estava certa, notas. Isso alimenta **métricas de acurácia** do Agent Space e, quando você informa a causa real, gera automaticamente uma memória em `reflections` que a próxima investigação daquele alarme vai ler. Também pode ser dado por chat ("a causa raiz estava errada, era X").
 
-**Diga:** "Vocês medem a acurácia com os incidentes de vocês, não com o marketing da AWS."
+**Faça:** abrir *Add feedback* na investigação do ensaio, marcar correta, preencher mitigação correta.
+
+**Diga:** "Vocês medem a acurácia com os incidentes de vocês, não com o marketing da AWS — e cada erro vira aprendizado automático."
 
 ---
 
@@ -173,6 +195,8 @@ Volte à investigação aberta na aba A. Se ainda não terminou, use a aba E (en
 
 ### 4.1 Ler a timeline (4 min)
 
+**O que é:** a **Timeline** mostra cada passo do agente em ordem: hipótese, ferramenta chamada (ex.: `GetMetricData`, `FilterLogEvents`, leitura de recursos do EKS), resultado, próxima decisão. Entradas de **sub-agente** (`logs`, `argocd-change`, `propose-mitigation`) expandem para mostrar a própria timeline interna. A aba **Summary** tem o resumo vivo (causa raiz, impacto, evidências, mitigação) e é por onde se lê rápido; a Timeline é para auditar *como* ele chegou lá. As **propostas de mitigação** aparecem inline no fim.
+
 Apontar, nesta ordem:
 
 1. **Root cause** — ConfigMap `REDIS_HOST: redis-cache`; confirma que não existe Service `redis-cache` no ns `checkout`; 100% dos erros são `Name does not resolve`.
@@ -181,7 +205,9 @@ Apontar, nesta ordem:
 4. **Plano de mitigação** — reverter `REDIS_HOST` via commit; por que `kubectl rollout undo` não resolve (self-heal); follow-up da probe.
 5. **Como ele chegou no commit sem ler o GitHub** — pelo histórico de sync do ArgoCD (`status.history`, revisão anterior vs. atual) e pelo valor antigo do ConfigMap. **Diga:** "Com o GitHub conectado ele ainda traz o diff e o autor; aqui ele chegou lá pelo ArgoCD."
 
-### 4.2 Chat na investigação (2 min) — Onde: campo de chat da investigação
+### 4.2 Chat na investigação (2 min) — Onde: *Chat with investigation*, na página da investigação
+
+**O que é:** você manda mensagens **para a investigação** (não para um chat genérico). Se ela estiver rodando, a mensagem entra numa fila (*Queued requests*) e o agente a pega entre passos de raciocínio — serve para *steering* ("olhe também o CoreDNS"). Se já concluiu, a mensagem **reabre** a investigação com todo o contexto. Mesma mecânica funciona via Slack (uma thread por investigação) e via MCP/A2A.
 
 **Cole, um por vez:**
 > Quantas requests de checkout falharam desde o início do incidente e qual seria o impacto estimado se ele durasse 1 hora?
@@ -190,24 +216,30 @@ Apontar, nesta ordem:
 
 **Diga:** "Mesmo chat funciona no Slack, uma thread por investigação."
 
-### 4.3 Fork (2 min) — Onde: timeline → mensagem onde ele decide investigar o ConfigMap → *Fork*
+### 4.3 Fork (2 min) — Onde: Timeline → ícone de ramificação *Fork from here* ao lado da mensagem em que ele decide investigar o ConfigMap
+
+**O que é:** (lançado em 2/10) uma *fork* é uma **nova investigação que herda a história até aquela mensagem** e segue outra direção, sem alterar a original. Você descreve em *Fork starting point* o que investigar diferente. A fork abre com link *Forked from* para o pai e *Show parent steps* para ver o herdado; a mensagem original passa a mostrar "N forks from this message". Serve para testar hipótese alternativa ou discordar do agente sem perder o trabalho feito.
 
 **Cole na fork:**
 > Investigue a hipótese alternativa: falha de resolução DNS no CoreDNS do cluster afetando todos os pods, e não apenas uma configuração errada do checkout-api. Compare com a evidência já coletada.
 
 **Diga:** "A fork parte do mesmo contexto até aquele ponto e roda em paralelo. Vocês discordam de uma hipótese sem jogar fora o trabalho."
 
-### 4.4 Review (2 min) — Onde: investigação concluída → *Review* (use a aba E se a atual ainda estiver rodando)
+### 4.4 Review (2 min) — Onde: investigação **concluída** → botão *Review* → aba *Review* (use a aba E se a atual ainda estiver rodando)
 
-**Faça:** lançar o Review.
+**O que é:** (lançado em 9/10) um *Review* é uma **avaliação de qualidade sob demanda** de uma investigação concluída. Não reexecuta nem altera nada: lê o registro (problema, evidências, conclusão) e devolve um veredito geral (**helpful / not helpful**) mais um **pass / fail / n.a. por critério**, com justificativa. Os 5 critérios padrão: *Scope alignment* (ficou no problema reportado?), *Evidence grounding* (conclusões apoiadas em evidência?), *Completeness* (cobriu as áreas relevantes e concluiu?), *Environment impact* (considerou o efeito no ambiente?), *Accuracy* (bate com a causa do ticket ligado?). Você pode ajustar, adicionar ou remover critérios para refletir como o time julga qualidade.
 
-**Diga:** "O agente avalia a qualidade da própria investigação: evidência suficiente? hipóteses descartadas corretamente? É isso que alimenta o dashboard de qualidade de vocês."
+**Faça:** lançar o Review; ler o veredito e 1–2 critérios.
+
+**Diga:** "O agente avalia a própria investigação em cinco critérios — e vocês podem trocar os critérios pelos de vocês. É assim que se decide se dá pra confiar numa causa raiz antes de agir."
 
 ---
 
 ## Parte 5 — Fechando o loop (10 min)
 
 ### 5.1 Kiro CLI consumindo o DevOps Agent (5 min) — Onde: T4
+
+**O que é:** o DevOps Agent expõe um **MCP server remoto** (autenticação por access token ou SigV4). Qualquer cliente MCP — Kiro, Claude Code, Cursor — ganha ferramentas como listar investigações, ler resumo/plano, iniciar investigação, conversar com o agente. No Kiro isso vem empacotado como um **power** (MCP + instruções). Além de MCP há **A2A** (agente chamando agente, com estados de tarefa), **ACP**, **webhooks** (entrada de eventos) e a **API** direta — é a mesma API que o `investigation-tail.py` usa. Mensagem para o time: a UI é uma das portas, não a única.
 
 **Cole no Kiro CLI:**
 > Use o DevOps Agent para listar as investigações do Agent Space checkout-devops-demo e me traga o plano de mitigação da mais recente, com a causa raiz em uma frase.
@@ -354,3 +386,32 @@ Formato: relatório em Markdown com uma seção por item, uma linha de resumo no
 ("Saudável" / "Atenção" / "Crítico" e por quê), e no máximo 3 recomendações acionáveis.
 Se nada for encontrado em um item, escreva "nenhum" — não invente.
 ```
+
+---
+
+## Apêndice B — Glossário de uma página (reler antes de começar)
+
+| Termo | Em uma frase | Onde aparece na demo |
+|---|---|---|
+| **Agent Space** | O escopo do agente: contas AWS associadas (via role read-only), integrações, conhecimento (skills, memórias), custom agents, usuários. Um por time/serviço. | Tudo roda dentro do `checkout-devops-demo`. |
+| **Investigação** | Unidade de trabalho de incidente: Triage → RCA → Mitigação, com Timeline e Summary. Criada por alarme, ticket, webhook, API, chat ou manualmente. | Parte 2 e 4. |
+| **Triage** | Primeiros segundos: correlaciona com investigações abertas, aplica skills de Triage (skip/correlação), decide investigar ou marcar *Skipped*. | 2.2 e 3.3. |
+| **Sub-agentes** | Partes da investigação delegadas em paralelo; cada um tem timeline própria expansível. | 4.1 (`logs`, `argocd-change`, `propose-mitigation`). |
+| **Timeline / Summary** | Timeline = cada passo e tool call (auditoria). Summary = resumo vivo (leitura rápida). | 4.1. |
+| **Propostas de mitigação** | Aparecem inline ao fim da RCA; são plano, não execução. | 4.1. |
+| **Chat with investigation** | Mensagem direcionada a uma investigação; steering se rodando, reabre se concluída. | 4.2. |
+| **Fork** | Nova investigação que herda a história até uma mensagem e segue outra hipótese. | 4.3. |
+| **Review** | Avaliação de qualidade sob demanda: helpful/not helpful + 5 critérios (editáveis). | 4.4. |
+| **Feedback** | Veredito estruturado (correto/incorreto + causa real) → métricas de acurácia + memória em `reflections`. | 3.6. |
+| **Skill** | `SKILL.md` procedural ("como fazer"), carregada sob demanda pela description; pode ter agent type. Runbook como código. | 3.1 e 3.3. |
+| **Learned skills** | Skills que o agente gera ao estudar o ambiente (Agent Space Understanding etc.). | 3.1. |
+| **Memória / memory store** | Conhecimento informacional ("o que é verdade aqui"), em stores: `monitors`, `directives`, `reflections`, understanding-*, e os seus. Versionada. | 3.2. |
+| **Agent instructions (AGENTS.md)** | Instruções sempre carregadas em toda sessão (diferente de skill, que é sob demanda). Não mostramos; citar se perguntarem "e regras globais?". | Q&A. |
+| **Custom agent** | Agente definido por você: system prompt + tools + skills + memory stores + trigger (schedule ou evento). Cada run = invocation com trajetória. | 3.4. |
+| **Directed actions** | Ações mutáveis que o agente executa só com (a) preferência ligada no Agent Space, (b) role elevado registrado, (c) aprovação do operador no chat. Desligado por padrão. | Q&A ("ele executa sozinho?"). |
+| **MCP remoto / power do Kiro** | Endpoint MCP do DevOps Agent para IDEs e CLIs; no Kiro vem como power. | 5.1. |
+| **A2A / ACP / webhooks / API** | Outras portas: agente↔agente, protocolo de cliente, eventos de entrada, API direta. | 5.1 e Q&A. |
+| **EventBridge** | Eventos de saída do agente (investigação criada/concluída/skipped) para automação própria. | 2.1 (usamos no sentido inverso: alarme → Lambda → agente). |
+| **Release management (preview)** | Lado *change*: release readiness review em PRs/MRs e release testing. Exige repo conectado. | 5.2 (só citado). |
+| **Private Connection** | Acesso do agente a ferramentas em rede privada (GitLab self-hosted, Grafana interno) via VPC Lattice. | Q&A. |
+| **Recommendations / Backlog** | Além de investigações, o agente gera recomendações proativas priorizadas (prevenção) no Backlog. | Visível na aba Backlog; citar se sobrar tempo. |

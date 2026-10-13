@@ -1,0 +1,42 @@
+# Public entry point used ONLY by AWS DevOps Agent release testing (and the presenter).
+# Security posture:
+#   - Separate Service: the in-cluster `checkout-api` Service stays ClusterIP.
+#   - NLB (L4) with a source-IP allowlist: DevOps Agent egress IPs for us-east-1
+#     (docs: Security -> "Inbound traffic from AWS DevOps Agent") + the presenter's IP.
+#     Everything else is dropped at the node security group.
+#   - Only port 80 -> 8080. The app exposes GET-only endpoints (/checkout, /health,
+#     /ready, /metrics); no auth exists, so the allowlist IS the access control.
+#   - No TLS: there is no domain/certificate for the demo; traffic is HTTP from
+#     allowlisted sources only. Do not reuse this pattern for real production.
+#   - Removed by `scripts/demo.sh unexpose` (deletes the file + commit).
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-api-public
+  labels:
+    app: checkout-api
+    exposure: public-allowlisted
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "project=checkout-api,env=prod,owner=platform-team,demo=checkout-devops-demo,purpose=release-testing"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local   # preserves client IP at the pod; healthy nodes only
+  selector:
+    app: checkout-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  loadBalancerSourceRanges:
+    # AWS DevOps Agent egress, us-east-1
+    - 34.228.181.128/32
+    - 44.219.176.187/32
+    - 54.226.244.221/32
+    - 100.56.22.59/32
+    - 3.234.39.4/32
+    - 44.215.92.10/32
+    # presenter (update with `scripts/demo.sh expose` if your IP changes)
+    - 179.42.57.212/32

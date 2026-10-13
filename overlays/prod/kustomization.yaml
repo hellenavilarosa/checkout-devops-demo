@@ -6,6 +6,7 @@ namespace: checkout
 resources:
   - ../../base
   - namespace.yaml
+  - public-service.yaml
 
 # Production values. Faults are injected by changing a value here, committing,
 # and letting ArgoCD sync (never kubectl). Demo scenarios:

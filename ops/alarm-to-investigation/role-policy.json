@@ -1,0 +1,10 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["aidevops:CreateBacklogTask"],
+      "Resource": "arn:aws:aidevops:us-east-1:<ACCOUNT_ID>:agentspace/<AGENT_SPACE_ID>"
+    }
+  ]
+}

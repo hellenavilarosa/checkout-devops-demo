@@ -21,6 +21,7 @@ Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalida
 | **Agent Space `checkout-devops-demo`** | Escopo do agente: conta associada via role `DevOpsAgentRole-AgentSpace` (read-only, `AIDevOpsAgentAccessPolicy`). | Onde moram investigações, skills, memórias, regras, custom agents. |
 | **`scripts/gh-commit.py`** | Commita no GitHub pela API REST (sem `git push`, bloqueado nesta máquina). | É o "git push" da demo. |
 | **`scripts/investigation-tail.py`** | Tail da investigação no terminal via API do DevOps Agent. | Mostra que tudo que a UI faz é API — e serve de fallback se a UI demorar. |
+| **`agent-space/` + `scripts/apply-agent-space.py`** | Skills, memória, custom agent e trigger como arquivos no repo, aplicados pela Asset API (`create-asset` / `create-trigger`). | Argumento central da Parte 3: o comportamento do agente é código versionado, não configuração clicada. |
 
 Ensaio de 13/10: alarme às 15:12 UTC → investigação criada em segundos → root cause às 15:18 → plano de mitigação às 15:23 (~9 min). O agente achou a causa (`REDIS_HOST=redis-cache`), uma **segunda mudança** que mascarou o rollout (readiness probe `/health`→`/ready`) e declarou o que não conseguiu ler por RBAC (`syncPolicy` da Application).
 
@@ -52,7 +53,8 @@ Checklist:
 - [ ] `overlays/prod/kustomization.yaml` saudável: `REDIS_HOST=redis`, `APP_VERSION=1.0.0`. Alarme `OK`. T2 mostrando `200`.
 - [ ] Web app logado no Agent Space `checkout-devops-demo`.
 - [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
-- [ ] Skill `runbook-argocd-rollback` e custom agent `eks-daily-health` criados (textos no Apêndice A).
+- [x] Conteúdo do Agent Space já criado via API (13/10): skills `runbook-argocd-rollback` e `skip-canary-window`, memory store `checkout-directives` com 1 memória, custom agent `eks-daily-health` com trigger diário 08:00 BRT. Fonte em `agent-space/`, aplicado por `python3 scripts/apply-agent-space.py` (idempotente). Só conferir no web app que aparecem.
+- [ ] Clicar **Run Now** no `eks-daily-health` hoje, para ter um relatório pronto na aba *History* amanhã (só dá pelo web app ou chat).
 - [ ] Kiro CLI com o power do DevOps Agent: em `kiro-cli chat`, `/tools` lista ferramentas do DevOps Agent.
 - [ ] `gh auth status` OK.
 - [ ] Vídeo de 90 s da investigação do ensaio salvo localmente.
@@ -125,9 +127,16 @@ Tudo na aba A. Diga uma vez: "Agora a parte que muda a relação de vocês com a
 
 **O que é:** uma *skill* é um arquivo `SKILL.md` (Markdown, formato aberto *Agent Skills*) com um cabeçalho `name` + `description` e instruções procedurais: quando usar, passos, o que não fazer. O agente lê a `description` de todas as skills e **carrega sozinho** as que forem relevantes à tarefa — por isso a description tem que dizer "use quando…". Pode ter arquivos de referência (tabelas, PDFs, diagramas) e ser restrita a um *agent type* (Triage, RCA, Mitigação, On-demand…). É o jeito de transformar runbook em comportamento. Também existem **learned skills** que o próprio agente gera ao estudar o ambiente (*Agent Space Understanding*, *Code Dependencies*, *Pipeline Topology*). Skills podem ser importadas de um repo GitHub e sincronizadas (não nesta demo).
 
-**Faça:** abrir `runbook-argocd-rollback` (pré-criada). Mostrar que é Markdown: quando aplicar, passos, o que NÃO fazer.
+**Faça:** abrir `runbook-argocd-rollback`. Mostrar o cabeçalho (`description` diz *quando* usar) e as regras ("NUNCA `kubectl rollout undo`"). Depois, em T3, mostrar a origem:
 
-**Diga:** "Isto é o runbook de vocês virando comportamento do agente. É Markdown, então vocês versionam no repo de vocês e sincronizam com o Agent Space — mudou o runbook, mudou o agente, com PR, review e blame. Não é prompt solto."
+```bash
+head -20 agent-space/skills/runbook-argocd-rollback/SKILL.md
+python3 scripts/apply-agent-space.py --dry-run
+```
+
+**Diga:** "Isto é o runbook de vocês virando comportamento do agente. Está no mesmo repo da aplicação, e esse script aplica pela API — mudou o runbook, mudou o agente, com PR, review e blame. Não é prompt solto."
+
+Mostrar também `skip-canary-window` (agent type *Incident Triage*) — é o passo 3.3.
 
 Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no backlog, ex. *Agent Space Understanding*). **Diga:** "Ele estudou o ambiente antes do primeiro incidente."
 
@@ -135,31 +144,18 @@ Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no bac
 
 **O que é:** *memória* é conhecimento **informacional** (fatos sobre o ambiente), em oposição à skill, que é **procedural** (como fazer). São arquivos Markdown agrupados em *memory stores*; o agente recebe só nomes/descrições dos stores e abre os relevantes sob demanda. Stores gerenciados pelo próprio agente: `monitors` (histórico de causas-raiz por alarme — um *Learning agent* roda 1x/dia sobre as investigações recentes), `directives` (instruções fixas que você escreve, ex.: "Lambdas não são mais usadas"), `reflections` (lições criadas automaticamente quando você marca uma investigação como errada e informa a causa real) e os de *understanding* (mapa de recursos, dependências, pipelines). Você também cria stores próprios. Cada memória é versionada. Aqui você vai adicionar uma **directive**.
 
-**Faça:** mostrar as memórias existentes. Adicionar uma ao vivo.
+**Faça:** mostrar o store `understanding-agent-space` (gerado pelo agente: `overview` + um arquivo por componente, incluindo `components/eks-agentic-troubleshooting`). Depois o store `checkout-directives` (criado por nós) com a memória `services/checkout-api/deployment-conventions`. Adicionar uma segunda memória ao vivo, pelo chat do Agent Space:
 
-**Cole:**
-> Deploys do checkout-api (namespace checkout) acontecem exclusivamente via ArgoCD com self-heal e prune ativados. Mudanças manuais no cluster são revertidas automaticamente; a mitigação correta é sempre um commit no repo checkout-devops-demo.
+**Cole no chat:**
+> Salve uma memória no store checkout-directives chamada services/checkout-api/release-windows: deploys de checkout-api em produção acontecem de segunda a quinta entre 10h e 16h BRT; fora dessa janela, um sync do ArgoCD em checkout-api é inesperado e deve ser tratado como suspeito em qualquer investigação.
 
-**Diga:** "Na próxima investigação ele não redescobre isso — e não sugere `kubectl rollout undo`."
+**Diga:** "O primeiro store o agente escreveu sozinho ao estudar a conta. O segundo somos nós ensinando o que não está em nenhuma API. Na próxima investigação ele não redescobre isso — e não sugere `kubectl rollout undo`."
 
 ### 3.3 Filtro de incidentes — skill de Triage (2 min) — Onde: Knowledge → Skills → Create
 
 **O que é:** não existe uma tela de "regras"; o filtro de ruído é uma **skill marcada com agent type *Incident Triage***. Na fase de triage (segundos após o alarme) o agente avalia essa skill e, se os critérios batem, marca o incidente como **Skipped** com a razão — sem abrir investigação. Também é assim que se ensinam regras de **correlação** (quais alarmes juntar numa só investigação). Dá para corrigir uma decisão de triage depois (unlink / reabrir), e cada skip gera um evento no EventBridge.
 
-**Faça:** *Create skill*, agent type **Incident Triage**, nome `skip-canary-window`.
-
-**Cole na description:**
-> Skip incidents from the checkout-api-error-rate alarm that fire during a planned canary rollout of the checkout-api application. Use this skill to avoid investigating expected error spikes right after a canary sync.
-
-**Cole no conteúdo:**
-> # Skip canary window
->
-> Skip the incident only if ALL of the following are true:
-> 1. The triggering alarm is `checkout-api-error-rate`.
-> 2. An ArgoCD sync of Application `checkout-api` happened in the last 10 minutes and its revision message contains `canary=true`.
-> 3. The error rate is below 50%.
->
-> Do NOT skip if the error rate is above 50% or if the sync message does not mention canary — a real outage must still be investigated.
+**Faça:** abrir a skill `skip-canary-window` (já criada; agent type **Incident Triage**, status ACTIVE). Ler os 3 critérios e o "Do NOT skip". Fonte: `agent-space/skills/skip-canary-window/SKILL.md`.
 
 **Diga:** "Vocês controlam o ruído em Markdown, com a mesma mecânica dos runbooks. Deploy em janela conhecida não vira incidente — e a decisão fica registrada."
 
@@ -167,7 +163,7 @@ Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no bac
 
 **O que é:** um *custom agent* é um agente que **você define**: um *system prompt* em Markdown (o que faz, como, que saída produz), um conjunto de **tools** escolhido entre as ferramentas do Agent Space (AWS, integrações, seus MCP servers), **skills** e **memory stores** anexados, e um **trigger** (agendado por cron/rate, ou por evento de webhook de uma integração). Cada execução é uma *invocation* com trajetória completa (raciocínio, tool calls, saída) e pode mandar notificações em tempo real para o canal configurado (ex.: Slack). Saídas possíveis: relatório/artefato, *recommendations* no backlog, mensagens. Também pode ser definido como código (CloudFormation `AWS::DevOpsAgent::Asset` + `Trigger`, CDK, Terraform) ou importado de um repo.
 
-**Faça:** abrir `eks-daily-health` (pré-criado). Mostrar schedule e instrução. Clicar **Run now** e deixar em background.
+**Faça:** abrir `eks-daily-health`. Mostrar: system prompt (os 5 itens e o "never invent findings"), tools (`use_aws`, `query_cloudwatch_logs`), skill e memory store anexados, trigger `cron(0 11 * * ? *)` (08:00 BRT). Abrir *History* e mostrar o resultado do Run Now de ontem. Clicar **Run Now** de novo e deixar em background.
 
 **Diga:** "Um SRE agendado. Todo dia 8h ele revisa o cluster e entrega o relatório no Slack. Outros exemplos: queries lentas do RDS da semana, HPAs que nunca escalaram, certificados vencendo. Vocês escrevem a instrução; o agente tem as ferramentas."
 
@@ -331,7 +327,18 @@ kubectl --context $CTX annotate application checkout-api -n argocd argocd.argopr
 
 ---
 
-## Apêndice A — Textos para criar no pré-flight
+## Apêndice A — Conteúdo do Agent Space (já aplicado; fonte em `agent-space/`)
+
+Tudo abaixo já existe no Agent Space, criado por `scripts/apply-agent-space.py`. Os arquivos-fonte são a referência; os textos abaixo são cópia para leitura rápida.
+
+| Asset | Arquivo | Id |
+|---|---|---|
+| skill `runbook-argocd-rollback` (GENERIC) | `agent-space/skills/runbook-argocd-rollback/SKILL.md` | `ki-5d51d79d-…` |
+| skill `skip-canary-window` (INCIDENT_TRIAGE) | `agent-space/skills/skip-canary-window/SKILL.md` | `ki-da532b0f-…` |
+| memory store `checkout-directives` | — | `ki-ecd1a491-…` |
+| memory `services/checkout-api/deployment-conventions` | `agent-space/memories/checkout-gitops-conventions.md` | `ki-d9e1e6aa-…` |
+| custom agent `eks-daily-health` | `agent-space/agents/eks-daily-health/AGENT.md` | `ki-46b44c1a-…` |
+| trigger diário 11:00 UTC → `custom:ki-46b44c1a-…` | — | `goal-5157eda1-…` |
 
 ### Skill `runbook-argocd-rollback`
 

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  labels:
+    app: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      containers:
+        - name: loadgen
+          image: public.ecr.aws/docker/library/alpine/curl:latest
+          # ~5 req/s against /checkout; prints a one-line status summary per request
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://checkout-api/checkout || echo 000)
+                echo "$(date -u +%FT%TZ) checkout status=$code"
+                sleep 0.2
+              done
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi

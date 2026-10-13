@@ -19,8 +19,9 @@ Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalida
 | **3 alarmes** (tag `project=checkout-api`) | `checkout-api-container-restarts` (Container Insights, ≥1 restart em 5 min), `checkout-api-latency-p99` (metric filter em `latency_ms`, p99 > 1 s por 2 min), `checkout-api-error-rate` (5xx > 20% por 2 min). | Detecção. Cada cenário dispara um alarme diferente — e o agente tem que descobrir que tipo de falha é. |
 | **EventBridge → Lambda `checkout-demo-alarm-to-investigation`** | Regra escuta os 3 alarmes → Lambda chama `CreateBacklogTask(INVESTIGATION)`. Não abre investigação nova se já houver uma em andamento para o mesmo alarme. | Faz a investigação abrir **sozinha**. Pra quem usa PagerDuty/Datadog/Grafana a integração é nativa e nem precisa da Lambda. |
 | **Agent Space `checkout-devops-demo`** | Escopo do agente: conta associada via role `DevOpsAgentRole-AgentSpace` (read-only, `AIDevOpsAgentAccessPolicy`). | Onde moram investigações, skills, memórias, regras, custom agents. |
+| **Service `checkout-api-public`** (NLB) | Entrada pública usada só pelo release testing. `loadBalancerSourceRanges` = 6 IPs de saída do DevOps Agent (us-east-1) + IP da apresentadora; SG dos nós só aceita esses CIDRs. Só porta 80, só GET, sem TLS (sem domínio). Tags do projeto. `demo.sh unexpose` remove. | Dá ao release testing uma URL real para bater — sem abrir a API ao mundo. |
 | **`scripts/gh-commit.py`** | Commita no GitHub pela API REST (sem `git push`, bloqueado nesta máquina). | É o "git push" da demo. |
-| **`scripts/demo.sh`** | Um subcomando por momento da demo: `status`, `break-memory`, `break-latency`, `force-alarm`, `watch`, `tail`, `fix-pr`, `merge`, `reset`. Usa `gh-commit.py` e `investigation-tail.py` por baixo. | Zero `sed` ao vivo. Todo passo continua passando por Git + ArgoCD. |
+| **`scripts/demo.sh`** | Um subcomando por momento da demo: `status`, `break-memory`, `break-latency`, `force-alarm`, `watch`, `tail`, `fix-pr`, `merge`, `reset`, `expose`, `unexpose`. Usa `gh-commit.py` e `investigation-tail.py` por baixo. | Zero `sed` ao vivo. Todo passo continua passando por Git + ArgoCD. |
 | **`agent-space/` + `scripts/apply-agent-space.py`** | Skills, memória, custom agent e trigger como arquivos no repo, aplicados pela Asset API (`create-asset` / `create-trigger`). | Argumento central da Parte 3: o comportamento do agente é código versionado, não configuração clicada. |
 
 **Cenário principal (A) — "right-sizing" que mata o pod.** Commit plausível baixa `limits.memory` de 128Mi para 56Mi. O pod sobe, fica Ready e serve ~3 min; o cache de idempotência cresce, estoura o limite, **OOMKilled**, restart, `CrashLoopBackOff` com janelas de `status=000` no cliente (26 de 73 requests num intervalo de 30 s no ensaio). Intermitente, não binário. Ensaio 13/10 18:35 UTC: alarme de restarts → investigação automática → o agente **reconstruiu o histórico de mudanças pelos ReplicaSets** (sem GitHub conectado), confirmou pelo kernel log do dataplane `oom-kill constraint=CONSTRAINT_MEMCG` (limite do container, não pressão do nó), cruzou `anon-rss≈48 MB` com o limite de 56Mi e propôs reverter para 128Mi via commit GitOps. Declarou o gap ("repositório não associado, diffs fora da mesa").
@@ -62,6 +63,8 @@ Checklist:
 - [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
 - [x] Conteúdo do Agent Space já criado via API (13/10): skills `runbook-argocd-rollback` e `skip-canary-window`, memory store `checkout-directives` com 1 memória, custom agent `eks-daily-health` com trigger diário 08:00 BRT. Fonte em `agent-space/`, aplicado por `python3 scripts/apply-agent-space.py` (idempotente). Só conferir no web app que aparecem.
 - [ ] Clicar **Run Now** no `eks-daily-health` hoje, para ter um relatório pronto na aba *History* amanhã (só dá pelo web app ou chat).
+- [ ] **Release testing** — `scripts/demo.sh expose` imprime a URL pública (NLB com allowlist). No web app: *Release → Test profiles → Add test profile*: nome `checkout-api-prod`, **Target URL** = a URL impressa, tipo **API testing**, sem autenticação. Rodar uma vez com o intent do passo 5.4 e conferir o relatório em *Tests*. Se o run não conseguir conectar, ver o Plano B do 5.4.
+- [ ] Parte 5 agora soma 15 min (5.0 Agent Actions 3 + 5.1 Kiro 5 + 5.2 PR 2 + 5.3 merge 2 + 5.4 testing 3). Se o tempo apertar, cortar primeiro o 3.6 e o 4.4.
 - [ ] **Agent Actions (directed actions)** — preferência já ligada no Agent Space. Falta o elevated role: `bash scripts/bootstrap-iam-elevated.sh` (cria `DevOpsAgent-ElevatedAction-checkout-demo`, escopo: só alarmes `checkout-api-*` e a regra de auto-investigação) e registrar o ARN impresso no console do DevOps Agent em *Access → conta AWS → Elevated role*. Confirmar status `valid`. Testar uma vez no chat com o prompt do passo 5.0 e depois reativar o alarme.
 - [ ] Kiro CLI com o power do DevOps Agent: em `kiro-cli chat`, `/tools` lista ferramentas do DevOps Agent.
 - [ ] `gh auth status` OK.
@@ -250,7 +253,7 @@ Apontar, nesta ordem:
 
 ---
 
-## Parte 5 — Fechando o loop (12 min)
+## Parte 5 — Fechando o loop (15 min)
 
 ### 5.0 Agent Actions — o agente executa com aprovação (3 min) — Onde: chat da investigação concluída (aba A)
 
@@ -300,9 +303,9 @@ scripts/demo.sh fix-pr            # branch fix/memory-limit + commit via API + g
 
 **Faça:** abrir o PR. Mostrar a descrição referenciando a investigação e o diff de uma linha.
 
-**Diga:** "O lado *change* do agente — release management, em preview — entra aqui: com o repo conectado ele avalia o risco do PR antes do merge, lê dependências e testes. Hoje não vou mostrar porque esta conta não tem a integração habilitada; é o próximo passo natural depois do que vocês viram."
+**Diga:** "O lado *change* do agente — release management, em preview — tem duas partes. A primeira, *release readiness review*, lê o diff do PR num repo conectado e avalia risco, dependências entre repos e IAM; não vou mostrar porque esta conta não tem a integração com o GitHub habilitada. A segunda, *release testing*, não precisa de repo — e é o que vamos fazer depois do merge."
 
-### 5.3 Merge → ArgoCD → verde (3 min) — Onde: T3, T1, T2
+### 5.3 Merge → ArgoCD → verde (2 min) — Onde: T3, T1, T2
 
 ```bash
 scripts/demo.sh merge             # squash-merge do PR fix/memory-limit + refresh no ArgoCD
@@ -310,7 +313,22 @@ scripts/demo.sh merge             # squash-merge do PR fix/memory-limit + refres
 
 T1: rollout, restarts zeram. T2: só `200`. Alarme de restarts volta a `OK` em até 5 min (mostrar na discussão).
 
-**Diga:** "Único toque humano: o merge. Detecção, diagnóstico, correção e deploy — tudo automatizado e auditável no Git."
+**Diga:** "Único toque humano: o merge. Mas deploy verde foi exatamente o que nos enganou no começo — então antes de declarar resolvido, o agente testa a aplicação de verdade."
+
+### 5.4 Release testing — o agente testa a aplicação (3 min) — Onde: aba A → *Release* → *Test profiles*
+
+**O que é:** (preview, só us-east-1) *release testing* gera e executa um **plano de testes contra uma instância rodando** da aplicação — UAT exploratório e regressão: para APIs, requests HTTP reais aos endpoints; para web, navegação com browser. Entrada: um **test profile** (nome, URL alvo pública, tipo UI ou API, credenciais opcionais com 2FA) e um *test intent* opcional em linguagem natural. Dispara pelo botão *Run*, por chat ("Run test profile …") ou de um pipeline (GitHub Action). Saída: relatório na aba *Tests* com o plano gerado, cada caso executado, evidências e veredito. Diferente do review de código, **não precisa de repositório conectado**. Cuidado real: ele faz requests de escrita (POST/PUT/DELETE) se a API permitir — por isso a doc manda apontar para staging; aqui a API é só GET.
+
+**Como a URL existe:** Service `checkout-api-public` (NLB) no overlay, com `loadBalancerSourceRanges` restrito aos 6 IPs de saída do DevOps Agent em us-east-1 + o seu IP. O security group dos nós só aceita esses CIDRs na porta; de qualquer outro lugar a conexão cai. `scripts/demo.sh expose` imprime a URL e atualiza seu IP se mudou; `scripts/demo.sh unexpose` remove tudo.
+
+**Faça:** abrir o test profile `checkout-api-prod` (criado no pré-flight) → *Run* → colar o intent → acompanhar na aba *Tests*. Leva alguns minutos; se não concluir a tempo, mostrar o relatório do run do pré-flight.
+
+**Cole em Test intent:**
+> Verify the checkout API after a memory-limit fix: GET /health must return 200 with redis reachable; GET /ready must return 200; 20 sequential GET /checkout calls must all return 200 with unique order_id values and p99 latency under 500 ms; unknown paths must return 404 with a JSON body. Report any 5xx or any response slower than 1 s as a failure.
+
+**Diga:** "Isso é verificação, não observação. O agente escreveu o plano a partir da minha intenção, bateu na API e me devolveu evidência — e esse mesmo run pode ser o gate de um pipeline, via GitHub Action, antes de promover para produção. Com o repo conectado, o plano sai do diff do PR em vez da minha frase."
+
+**Plano B:** se o run falhar por conexão, o ambiente de testes pode estar saindo por IP fora da lista publicada — rodar `scripts/demo.sh expose` para confirmar a URL e, se preciso, abrir temporariamente o allowlist no `public-service.yaml`.
 
 ---
 
@@ -417,6 +435,6 @@ Tudo abaixo já existe no Agent Space, criado por `scripts/apply-agent-space.py`
 | **MCP remoto / power do Kiro** | Endpoint MCP do DevOps Agent para IDEs e CLIs; no Kiro vem como power. | 5.1. |
 | **A2A / ACP / webhooks / API** | Outras portas: agente↔agente, protocolo de cliente, eventos de entrada, API direta. | 5.1 e Q&A. |
 | **EventBridge** | Eventos de saída do agente (investigação criada/concluída/skipped) para automação própria. | 2.1 (usamos no sentido inverso: alarme → Lambda → agente). |
-| **Release management (preview)** | Lado *change*: release readiness review em PRs/MRs e release testing. Exige repo conectado. | 5.2 (só citado). |
+| **Release management (preview)** | Lado *change*: *release readiness review* (lê o diff do PR; exige repo conectado — só citado) e *release testing* (testa a aplicação rodando a partir de um test profile com URL pública; não exige repo). | 5.2 e 5.4. |
 | **Private Connection** | Acesso do agente a ferramentas em rede privada (GitLab self-hosted, Grafana interno) via VPC Lattice. | Q&A. |
 | **Recommendations / Backlog** | Além de investigações, o agente gera recomendações proativas priorizadas (prevenção) no Backlog. | Visível na aba Backlog; citar se sobrar tempo. |

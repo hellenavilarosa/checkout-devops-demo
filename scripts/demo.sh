@@ -10,6 +10,8 @@
 #   scripts/demo.sh fix-pr          # scenario A manual fallback for Kiro CLI: branch + commit + PR
 #   scripts/demo.sh merge           # merge the open fix PR, hard-refresh ArgoCD
 #   scripts/demo.sh reset           # back to healthy baseline (one commit)
+#   scripts/demo.sh expose          # public NLB for release testing (allowlist: DevOps Agent IPs + yours); prints URL
+#   scripts/demo.sh unexpose        # remove the public NLB (ArgoCD prune)
 #
 # Every change goes through Git (gh-commit.py) and ArgoCD — never kubectl apply.
 set -euo pipefail
@@ -140,6 +142,31 @@ case "${1:-}" in
     echo "baseline restored; alarms actions enabled."
     ;;
 
+  expose)
+    # Public NLB for release testing. Refreshes the presenter IP in the allowlist, prints URL.
+    MYIP=$(curl -s --max-time 5 https://checkip.amazonaws.com)
+    PUB=overlays/prod/public-service.yaml
+    if ! grep -q "    - ${MYIP}/32" "$PUB"; then
+      sed -i '' "/# presenter/{n;s#.*#    - ${MYIP}/32#;}" "$PUB"
+      grep -q "public-service.yaml" "$OVERLAY" || sed -i '' 's#^  - namespace.yaml$#  - namespace.yaml\n  - public-service.yaml#' "$OVERLAY"
+      python3 scripts/gh-commit.py "$REPO" main "chore(prod): refresh presenter IP in public allowlist" overlays/prod | tail -1
+      kubectl --context "$CTX" annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+      echo "allowlist updated with ${MYIP}/32 (SG rules follow in ~30s)"
+    fi
+    H=$(kubectl --context "$CTX" get svc -n checkout checkout-api-public -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+    [ -n "$H" ] || { echo "public service not provisioned yet; wait ~2 min and re-run"; exit 0; }
+    echo "URL para o test profile (API testing): http://$H"
+    curl -s --max-time 8 -w '  -> /health %{http_code} (%{time_total}s)\n' -o /dev/null "http://$H/health" || echo "  -> sem resposta ainda (targets registrando) ou seu IP mudou"
+    ;;
+
+  unexpose)
+    # Removes the public NLB entirely (prune=true deletes the Service -> NLB and SG rules go away).
+    sed -i '' '/^  - public-service.yaml$/d' "$OVERLAY"
+    python3 scripts/gh-commit.py "$REPO" main "chore(prod): remove public NLB after demo" "$OVERLAY" | tail -1
+    kubectl --context "$CTX" annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite >/dev/null
+    echo "public Service removed from the overlay; ArgoCD prune deletes the NLB in ~1 min."
+    ;;
+
   *)
-    sed -n '2,13p' "$0"; exit 1 ;;
+    sed -n '2,15p' "$0"; exit 1 ;;
 esac

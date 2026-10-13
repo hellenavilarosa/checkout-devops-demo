@@ -13,7 +13,7 @@ Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalida
 | Componente | O que é | Por que está na demo |
 |---|---|---|
 | **App `checkout-api`** (ns `checkout`) | API Python com `/checkout` (Redis + fraud-scoring opcional), `/health`, `/ready`, `/metrics`. Logs JSON com `latency_ms`. Cache de idempotência em memória (TTL 5 min) — por isso a memória cresce ~4 MiB/min após cada restart. 2 réplicas + `redis` + `loadgen` (~5 req/s, imprime status e tempo). | App limpa e realista. Toda a falha é injetada via Git, nunca via `kubectl`. |
-| **Repo GitOps** `checkout-devops-demo` | Kustomize: `base/` (manifests + código) e `overlays/prod/` (ConfigMap com `REDIS_HOST`, `APP_VERSION`). | Espelha o fluxo do cliente: tudo entra por Git. |
+| **Repo GitOps** `checkout-devops-demo` | Kustomize: `base/` (manifests + código) e `overlays/prod/` (ConfigMap: `REDIS_HOST`, `APP_VERSION`, `FRAUD_CHECK_URL`; patch de `resources`). | Espelha o fluxo do cliente: tudo entra por Git. |
 | **ArgoCD Application `checkout-api`** | Auto-sync + self-heal + prune, aponta pro repo acima. | Quando o commit ruim entra, o ArgoCD aplica sozinho. Self-heal também impede `kubectl rollout undo` — ponto de discussão. |
 | **Add-on `amazon-cloudwatch-observability`** | Container Insights + Fluent Bit mandando logs dos pods pro CloudWatch (`/aws/containerinsights/<cluster>/application`). | É daqui que o DevOps Agent lê métricas e logs. Sem isso ele não vê o cluster. |
 | **3 alarmes** (tag `project=checkout-api`) | `checkout-api-container-restarts` (Container Insights, ≥1 restart em 5 min), `checkout-api-latency-p99` (metric filter em `latency_ms`, p99 > 1 s por 2 min), `checkout-api-error-rate` (5xx > 20% por 2 min). | Detecção. Cada cenário dispara um alarme diferente — e o agente tem que descobrir que tipo de falha é. |
@@ -387,59 +387,17 @@ Tudo abaixo já existe no Agent Space, criado por `scripts/apply-agent-space.py`
 | custom agent `checkout-api-specialist` (sob demanda, escopo por tag `project=checkout-api`) | `agent-space/agents/checkout-api-specialist/AGENT.md` | `ki-163df40a-…` |
 | trigger diário 11:00 UTC → `custom:ki-46b44c1a-…` | — | `goal-5157eda1-…` |
 
-### Skill `runbook-argocd-rollback`
+### O que cada asset diz (resumo; o conteúdo real está em inglês nos arquivos)
 
-```markdown
-# Runbook: rollback de aplicação gerida por ArgoCD
+**Skill `runbook-argocd-rollback`** (GENERIC, ACTIVE). Quando usar: incidente em Application do ArgoCD com auto-sync + self-heal e causa provável em mudança recente de ConfigMap, imagem, env ou probe. Regras: NUNCA `kubectl rollout undo/edit/set image/apply` (self-heal reverte em segundos); mitigação é SEMPRE commit no repo de `spec.source.repoURL`/`spec.source.path`; preferir revert do commit culpado; avisar sobre `prune`. Passos: ler `status.sync.revision` e `status.history`, correlacionar início do erro com o sync, comparar revisões (ConfigMap, imagem, env, probes), checar mudança adjacente que mascarou o rollout, propor revert + hard refresh, registrar follow-ups e gaps de RBAC. Verificação: `Synced`/`Healthy`, pods Ready, 5xx no baseline por 5 min.
 
-## Quando usar
-Incidente em uma Application do ArgoCD com auto-sync e self-heal ativados, em que a
-causa provável é uma mudança recente de configuração ou imagem.
+**Skill `skip-canary-window`** (INCIDENT_TRIAGE, ACTIVE). Pula o incidente só se TODAS: alarme é `checkout-api-error-rate`; houve sync do ArgoCD em `checkout-api` nos últimos 10 min com `canary=true` na mensagem da revisão; erro < 50%. Nunca pula acima de 50% ou sem menção a canary. Ao pular, cita a revisão.
 
-## Regras
-1. NUNCA sugerir `kubectl rollout undo`, `kubectl edit` ou `kubectl apply` manual:
-   o self-heal reverte a mudança em segundos e esconde a mitigação.
-2. A mitigação é sempre um commit no repositório GitOps da Application
-   (campo `spec.source.repoURL`), no path do overlay afetado.
-3. Preferir revert do commit culpado a um fix manual, salvo quando o revert
-   reintroduz outro problema conhecido.
+**Memory store `checkout-directives`** → memória `services/checkout-api/deployment-conventions`: deploys só via ArgoCD (auto-sync, self-heal, prune) a partir de `overlays/prod`; mudanças manuais são revertidas; depende do Service `redis` (hostname em `REDIS_HOST` do ConfigMap `checkout-api-config`); probes em `/ready`, `/health` checa Redis.
 
-## Passos
-1. Identificar a Application (`kubectl get application -n argocd`) e a revisão
-   atual (`status.sync.revision`).
-2. Comparar a revisão atual com a anterior no histórico do ArgoCD
-   (`status.history`) e no Git.
-3. Localizar a mudança de ConfigMap/imagem/probe que coincide com o início do erro.
-4. Propor: revert do commit (ou patch mínimo) + verificação pós-sync
-   (pods Ready, taxa de erro < 1% por 5 min).
-5. Registrar follow-ups: mudanças adjacentes que mascararam o problema
-   (ex.: probes alteradas) e permissões que impediram leitura completa.
+**Custom agent `eks-daily-health`** (schedule `cron(0 11 * * ? *)` = 08:00 BRT; tools `use_aws`, `query_cloudwatch_logs`; skill runbook; store checkout-directives). SRE revisando as últimas 24 h do cluster: pods com > 3 restarts e última razão; nodes com Memory/Disk/PIDPressure; PVCs > 80%; alarmes que oscilaram; Deployments abaixo do desejado por > 5 min. Saída: relatório Markdown com veredito no topo (Healthy/Attention/Critical), até 3 recomendações, "none" quando não há achado — nunca inventar; cria artefato e manda a linha de veredito se houver canal.
 
-## Verificação
-- `kubectl get application <nome> -n argocd` mostra `Synced` e `Healthy`.
-- Métrica de 5xx volta ao baseline por 5 minutos.
-```
-
-### Custom agent `eks-daily-health`
-
-- **Schedule:** diário, 08:00 America/Sao_Paulo.
-- **Instrução:**
-
-```
-Você é um SRE revisando a saúde do cluster EKS eks-agentic-troubleshooting (us-east-1)
-nas últimas 24 horas. Use Container Insights, CloudWatch Logs e alarmes.
-
-Verifique e reporte, nesta ordem:
-1. Pods com mais de 3 restarts, por namespace, com a última razão de término.
-2. Nodes com MemoryPressure, DiskPressure ou PIDPressure.
-3. PVCs acima de 80% de uso.
-4. Alarmes que mudaram de estado (OK<->ALARM), quantas vezes e por quanto tempo.
-5. Deployments cujo número de réplicas disponíveis ficou abaixo do desejado por mais de 5 min.
-
-Formato: relatório em Markdown com uma seção por item, uma linha de resumo no topo
-("Saudável" / "Atenção" / "Crítico" e por quê), e no máximo 3 recomendações acionáveis.
-Se nada for encontrado em um item, escreva "nenhum" — não invente.
-```
+**Custom agent `checkout-api-specialist`** (sob demanda; mesmos tools/skill/store). System prompt = descrição do projeto: o que é o checkout-api e por que é crítico; owners (`owner=platform-team`); SLOs (99,9%, p99 < 500 ms); arquitetura no EKS (Deployment, Service, Redis, fraud-scoring opcional fail-open, ConfigMap e suas chaves, cache de idempotência, probes); como mudanças chegam em prod (ArgoCD, GitOps, nunca kubectl); observabilidade (log group, campos `log_processed.*`, namespaces de métricas, os 3 alarmes, EventBridge→Lambda); e a regra de escopo: tudo do projeto tem a tag `project=checkout-api` na AWS e o label `project=checkout-api` no Kubernetes — começar por `resourcegroupstaggingapi get-resources` e pelas memórias de `understanding-agent-space`. Conhece as 3 famílias de falha (dependência errada, pressão de recurso, upstream lento) e deve reportar impacto, causa com evidência, commit a reverter e o que não conseguiu ler.
 
 ---
 

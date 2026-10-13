@@ -62,6 +62,7 @@ Checklist:
 - [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
 - [x] Conteúdo do Agent Space já criado via API (13/10): skills `runbook-argocd-rollback` e `skip-canary-window`, memory store `checkout-directives` com 1 memória, custom agent `eks-daily-health` com trigger diário 08:00 BRT. Fonte em `agent-space/`, aplicado por `python3 scripts/apply-agent-space.py` (idempotente). Só conferir no web app que aparecem.
 - [ ] Clicar **Run Now** no `eks-daily-health` hoje, para ter um relatório pronto na aba *History* amanhã (só dá pelo web app ou chat).
+- [ ] **Agent Actions (directed actions)** — preferência já ligada no Agent Space. Falta o elevated role: `bash scripts/bootstrap-iam-elevated.sh` (cria `DevOpsAgent-ElevatedAction-checkout-demo`, escopo: só alarmes `checkout-api-*` e a regra de auto-investigação) e registrar o ARN impresso no console do DevOps Agent em *Access → conta AWS → Elevated role*. Confirmar status `valid`. Testar uma vez no chat com o prompt do passo 5.0 e depois reativar o alarme.
 - [ ] Kiro CLI com o power do DevOps Agent: em `kiro-cli chat`, `/tools` lista ferramentas do DevOps Agent.
 - [ ] `gh auth status` OK.
 - [ ] Vídeo de 90 s da investigação do ensaio salvo localmente.
@@ -251,7 +252,31 @@ Apontar, nesta ordem:
 
 ---
 
-## Parte 5 — Fechando o loop (10 min)
+## Parte 5 — Fechando o loop (12 min)
+
+### 5.0 Agent Actions — o agente executa com aprovação (3 min) — Onde: chat da investigação concluída (aba A)
+
+**O que é:** por padrão o agente só **lê**. *Directed actions* (no console: *Agent Actions*) é o opt-in em três camadas para ele **executar** operações que mudam recursos: (1) a preferência ligada no Agent Space (você já ligou), (2) um **elevated role** registrado na associação da conta — um IAM role que define o *teto* do que o agente pode fazer; a demo usa um role que só consegue mexer nos alarmes `checkout-api-*` e na regra de auto-investigação, (3) **aprovação humana por ação**, no chat: o agente propõe a operação com os parâmetros, você pode editar e aprovar ou recusar. A execução usa credenciais recortadas para aquela operação/recurso, válidas por pouco tempo, e aparece no **CloudTrail com a identidade de quem aprovou**. Guardrails do próprio agente: nunca deleta recursos, nunca passa IAM roles. Importante para o público: isso vale para AWS e para ferramentas de terceiros (uma regra do Grafana, um ticket), com classificação de tool read-only vs. mutating.
+
+**Faça:** na investigação concluída (ou na aba E), abrir o chat e pedir uma ação operacional plausível: o fix vai entrar por PR, então silenciar o alarme que está oscilando.
+
+**Cole no chat:**
+> O fix do limite de memória vai entrar por PR nos próximos minutos. Enquanto isso, desative as ações do alarme checkout-api-container-restarts para ele parar de abrir investigações, e me diga exatamente o que você vai executar antes de executar.
+
+Mostrar o cartão de aprovação: operação (`cloudwatch:DisableAlarmActions`), recurso, parâmetros editáveis. **Aprovar.** Em T3, provar:
+
+```bash
+aws cloudwatch describe-alarms --alarm-names checkout-api-container-restarts --query 'MetricAlarms[0].ActionsEnabled'
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=DisableAlarmActions --max-results 1 --query 'Events[0].[EventTime,Username]' --output text
+```
+
+**Diga:** "Ele não fez nada sozinho: propôs, eu aprovei, ele executou com uma credencial que só servia pra essa operação, e o CloudTrail registra *quem* aprovou. O role que registrei só alcança esses alarmes e essa regra — o teto é vocês quem definem. Delete de recurso ele recusa mesmo que o role permita."
+
+Depois do merge (5.3), pedir o inverso no mesmo chat: *"Reative as ações do alarme checkout-api-container-restarts."*
+
+**Por que não uma ação no Kubernetes:** o agente age via APIs AWS (e MCP de terceiros); e com self-heal do ArgoCD qualquer `kubectl` seria revertido em segundos — a mitigação certa continua sendo o PR. Isso é um bom ponto de discussão, não uma limitação a esconder.
+
+**Plano B:** se o cartão de aprovação não aparecer, verificar no console *Access → conta → Elevated role* se o status está `valid` (não `pending-confirmation`); se não houver tempo, mostrar a doc do fluxo e seguir pro 5.1.
 
 ### 5.1 Kiro CLI consumindo o DevOps Agent (5 min) — Onde: T4
 

@@ -143,6 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/ready": "process-level readiness",
                         "/checkout": "creates an order and returns its id (GET; honours Idempotency-Key)",
                         "/metrics": "Prometheus text format",
+                        "/openapi.json": "OpenAPI 3.0 specification of this API",
                     },
                 }
             elif self.path == "/ready":
@@ -168,6 +169,16 @@ class Handler(BaseHTTPRequestHandler):
                     order_id = f"ORD-{int(order_no):08d}"
                     remember_order(idem_key, order_id)
                     status, body = 200, {"order_id": order_id}
+            elif self.path == "/openapi.json":
+                spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openapi.json")
+                with open(spec_path, "rb") as f:
+                    text = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(text)))
+                self.end_headers()
+                self.wfile.write(text)
+                return
             elif self.path == "/metrics":
                 avg = (METRICS["latency_ms_sum"] / METRICS["requests_total"]
                        if METRICS["requests_total"] else 0.0)

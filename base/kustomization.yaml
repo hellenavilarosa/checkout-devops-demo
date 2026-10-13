@@ -11,6 +11,7 @@ configMapGenerator:
   - name: checkout-api-code
     files:
       - server.py=app/server.py
+      - openapi.json=app/openapi.json
   # Runtime knobs. Overlays patch this; faults are injected by changing
   # these values in Git and letting ArgoCD sync.
   - name: checkout-api-config

@@ -1,0 +1,197 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "checkout-api",
+    "version": "1.0.0",
+    "description": "Order checkout service for the checkout-devops-demo. Read-only demo API: every operation is an idempotent GET. Orders are counted in Redis; a short-lived in-memory idempotency cache lets clients retry with the same Idempotency-Key and receive the same order id.\n\nService-level objectives under test:\n- Availability: 99.9% of /checkout calls return HTTP 200.\n- Latency: p99 of /checkout under 500 ms.\n- Correctness: order ids are unique across calls without an Idempotency-Key, and identical with the same key within 5 minutes."
+  },
+  "servers": [
+    { "url": "/", "description": "Public NLB endpoint (HTTP only, source-IP restricted)" }
+  ],
+  "tags": [
+    { "name": "orders", "description": "Order creation" },
+    { "name": "operations", "description": "Health, readiness and metrics" }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "Service index",
+        "description": "Lists the service name, running version and available endpoints.",
+        "operationId": "getIndex",
+        "responses": {
+          "200": {
+            "description": "Service index",
+            "headers": { "X-App-Version": { "$ref": "#/components/headers/X-App-Version" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ServiceIndex" } } }
+          }
+        }
+      }
+    },
+    "/checkout": {
+      "get": {
+        "tags": ["orders"],
+        "summary": "Create an order",
+        "description": "Creates an order and returns its id. Each call without an Idempotency-Key produces a new, unique, monotonically increasing id (`ORD-00000042`). Repeating a call with the same Idempotency-Key within 5 minutes returns the same order id with `replayed: true`. Expected latency: under 500 ms at p99.",
+        "operationId": "createOrder",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Client-chosen key. Retries with the same key within 5 minutes return the original order instead of creating a new one.",
+            "schema": { "type": "string", "maxLength": 128, "example": "cart-7f3a9c" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order created (or replayed)",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-App-Version": { "$ref": "#/components/headers/X-App-Version" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Order" },
+                "examples": {
+                  "new": { "value": { "order_id": "ORD-00078577" } },
+                  "replayed": { "value": { "order_id": "cart-7f3a9c", "replayed": true } }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Injected business failure (payment provider timeout)",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "503": {
+            "description": "Redis unreachable; order could not be persisted",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "Dependency health",
+        "description": "Pings Redis. Returns 200 only when the order store is reachable.",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" },
+                "example": { "status": "ok", "redis": "redis" }
+              }
+            }
+          },
+          "503": {
+            "description": "Redis unreachable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "Process readiness",
+        "description": "Process-level readiness: the HTTP server is up and accepting connections. Does not check dependencies.",
+        "operationId": "getReady",
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string", "enum": ["ready"] } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "Prometheus metrics",
+        "description": "Prometheus text exposition format. Counters: checkout_requests_total, checkout_errors_total. Gauges: checkout_latency_ms_avg, checkout_recent_orders_cached.",
+        "operationId": "getMetrics",
+        "responses": {
+          "200": {
+            "description": "Metrics",
+            "content": {
+              "text/plain": {
+                "schema": { "type": "string" },
+                "example": "# TYPE checkout_requests_total counter\ncheckout_requests_total 1234\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["operations"],
+        "summary": "This specification",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": { "description": "OpenAPI 3.0 document", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "headers": {
+      "X-Request-Id": { "description": "Server-generated request id (UUID v4)", "schema": { "type": "string", "format": "uuid" } },
+      "X-App-Version": { "description": "Running application version", "schema": { "type": "string", "example": "1.0.0" } }
+    },
+    "schemas": {
+      "Order": {
+        "type": "object",
+        "required": ["order_id"],
+        "properties": {
+          "order_id": {
+            "type": "string",
+            "description": "Unique order id. Server-generated ids match ORD-<8 digits>; replayed orders echo the client's Idempotency-Key.",
+            "example": "ORD-00078577"
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "Present and true when the response was served from the idempotency cache."
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": ["status", "redis"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "redis": { "type": "string", "description": "Hostname of the Redis service that answered the ping", "example": "redis" }
+        }
+      },
+      "ServiceIndex": {
+        "type": "object",
+        "required": ["service", "version", "endpoints"],
+        "properties": {
+          "service": { "type": "string", "enum": ["checkout-api"] },
+          "version": { "type": "string" },
+          "endpoints": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "example": "[Errno -2] Name does not resolve" },
+          "request_id": { "type": "string", "format": "uuid" }
+        }
+      }
+    }
+  }
+}

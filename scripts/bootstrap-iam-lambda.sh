@@ -27,7 +27,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name create-investigation -
   \"Version\": \"2012-10-17\",
   \"Statement\": [{
     \"Effect\": \"Allow\",
-    \"Action\": [\"aidevops:CreateBacklogTask\"],
+    \"Action\": [\"aidevops:CreateBacklogTask\", \"aidevops:ListBacklogTasks\"],
     \"Resource\": \"arn:aws:aidevops:${REGION}:${ACCOUNT}:agentspace/${AGENT_SPACE_ID}\"
   }]
 }"

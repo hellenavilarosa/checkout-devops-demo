@@ -53,7 +53,11 @@ Abas do navegador, nesta ordem: **(A)** web app do DevOps Agent · **(B)** GitHu
 Checklist:
 
 - [ ] `overlays/prod/kustomization.yaml` saudável: `memory: 64Mi`/`128Mi`, `FRAUD_CHECK_URL=` (vazio), `APP_VERSION=1.0.0`. Os 3 alarmes em `OK`. T2 mostrando `status=200 time=0.02s`.
-- [ ] Rodar `aws iam put-role-policy --role-name checkout-demo-alarm-to-investigation --policy-name create-investigation --policy-document file://ops/alarm-to-investigation/role-policy.json` (adiciona `ListBacklogTasks`, usado pelo dedup da Lambda).
+- [ ] Permissão de dedup da Lambda (uma vez). O JSON no repo tem placeholders; renderize antes (`.local/` é gitignored):
+  ```bash
+  sed "s/<ACCOUNT_ID>/$(aws sts get-caller-identity --query Account --output text)/; s/<AGENT_SPACE_ID>/$(cat .agent-space-id)/" ops/alarm-to-investigation/role-policy.json > .local/role-policy.rendered.json
+  aws iam put-role-policy --role-name checkout-demo-alarm-to-investigation --policy-name create-investigation --policy-document file://.local/role-policy.rendered.json
+  ```
 - [ ] Web app logado no Agent Space `checkout-devops-demo`.
 - [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
 - [x] Conteúdo do Agent Space já criado via API (13/10): skills `runbook-argocd-rollback` e `skip-canary-window`, memory store `checkout-directives` com 1 memória, custom agent `eks-daily-health` com trigger diário 08:00 BRT. Fonte em `agent-space/`, aplicado por `python3 scripts/apply-agent-space.py` (idempotente). Só conferir no web app que aparecem.

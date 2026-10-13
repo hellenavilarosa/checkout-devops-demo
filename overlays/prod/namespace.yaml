@@ -4,3 +4,6 @@ metadata:
   name: checkout
   labels:
     app.kubernetes.io/part-of: checkout
+    project: checkout-api
+    env: prod
+    owner: platform-team

@@ -43,15 +43,25 @@ MEMORIES = {
         "why kubectl changes are reverted, its Redis dependency and probe behaviour.",
     }
 }
-CUSTOM_AGENT = {
-    "name": "eks-daily-health",
-    # Built-in tool identifiers documented for custom agents. Other tools (integrations,
-    # MCP servers) are easiest to add through Chat: "Add the X tool to my eks-daily-health agent."
-    "tools": ["use_aws", "query_cloudwatch_logs"],
-    "skills": ["runbook-argocd-rollback"],
-    "memory_stores": ["checkout-directives"],
-}
-TRIGGER_SCHEDULE = "cron(0 11 * * ? *)"  # 11:00 UTC = 08:00 America/Sao_Paulo
+# Built-in tool identifiers documented for custom agents. Other tools (integrations,
+# MCP servers) are easiest to add through Chat: "Add the X tool to my <agent> agent."
+TOOLS = ["use_aws", "query_cloudwatch_logs"]
+CUSTOM_AGENTS = [
+    {   # scheduled cluster health report
+        "name": "eks-daily-health",
+        "tools": TOOLS,
+        "skills": ["runbook-argocd-rollback"],
+        "memory_stores": ["checkout-directives"],
+        "schedule": "cron(0 11 * * ? *)",  # 11:00 UTC = 08:00 America/Sao_Paulo
+    },
+    {   # on-demand specialist scoped to the tag project=checkout-api
+        "name": "checkout-api-specialist",
+        "tools": TOOLS,
+        "skills": ["runbook-argocd-rollback"],
+        "memory_stores": ["checkout-directives"],
+        "schedule": None,
+    },
+]
 
 
 def aws(*args, payload=None):
@@ -142,31 +152,34 @@ def main():
         md = read(f"agent-space/memories/{file_stem}.md")
         sp.upsert("memory", {**meta, "memory_store_id": store_id}, f"{meta['name']}.md", md)
 
-    agent_meta = {
-        "name": CUSTOM_AGENT["name"],
-        "tools": CUSTOM_AGENT["tools"],
-        "skills": [skill_ids[s] for s in CUSTOM_AGENT["skills"]],
-        "memory_stores": [store_id],
-    }
-    agent_id = sp.upsert("custom_agent", agent_meta, "AGENT.md",
-                         read(f"agent-space/agents/{CUSTOM_AGENT['name']}/AGENT.md"))
-
-    # Scheduled trigger for the custom agent
-    target = f"custom:{agent_id}"
-    triggers = aws("list-triggers", "--agent-space-id", AGENT_SPACE_ID).get("items", [])
-    existing = next((t for t in triggers if json.dumps(t.get("action", {})).find(target) >= 0), None)
-    if a.dry_run:
-        print(f"{'keep' if existing else 'create'} trigger {TRIGGER_SCHEDULE} -> {target}")
-        return
-    if existing:
-        print(f"trigger exists ({existing.get('triggerId')}) -> {target}")
-    else:
-        res = aws("create-trigger", payload={
-            "agentSpaceId": AGENT_SPACE_ID, "type": "TIME_BASED",
-            "condition": {"schedule": {"expression": TRIGGER_SCHEDULE}},
-            "action": {"actionType": "create:task", "task": {"agent": target}},
-            "status": "Active"})
-        print(f"created trigger {res.get('trigger', res).get('triggerId')} {TRIGGER_SCHEDULE} -> {target}")
+    triggers = None
+    for agent in CUSTOM_AGENTS:
+        agent_meta = {
+            "name": agent["name"],
+            "tools": agent["tools"],
+            "skills": [skill_ids[s] for s in agent["skills"]],
+            "memory_stores": [store_id],
+        }
+        agent_id = sp.upsert("custom_agent", agent_meta, "AGENT.md",
+                             read(f"agent-space/agents/{agent['name']}/AGENT.md"))
+        if not agent["schedule"]:
+            continue
+        # Scheduled trigger for the custom agent (matched by its target)
+        target = f"custom:{agent_id}"
+        if triggers is None:
+            triggers = aws("list-triggers", "--agent-space-id", AGENT_SPACE_ID).get("items", [])
+        existing = next((t for t in triggers if json.dumps(t.get("action", {})).find(target) >= 0), None)
+        if a.dry_run:
+            print(f"{'keep' if existing else 'create'} trigger {agent['schedule']} -> {target}")
+        elif existing:
+            print(f"trigger exists ({existing.get('triggerId')}) -> {target}")
+        else:
+            res = aws("create-trigger", payload={
+                "agentSpaceId": AGENT_SPACE_ID, "type": "TIME_BASED",
+                "condition": {"schedule": {"expression": agent["schedule"]}},
+                "action": {"actionType": "create:task", "task": {"agent": target}},
+                "status": "Active"})
+            print(f"created trigger {res.get('trigger', res).get('triggerId')} {agent['schedule']} -> {target}")
 
 
 if __name__ == "__main__":

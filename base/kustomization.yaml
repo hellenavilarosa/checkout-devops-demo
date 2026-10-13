@@ -23,3 +23,4 @@ configMapGenerator:
 
 commonLabels:
   app.kubernetes.io/part-of: checkout
+  project: checkout-api

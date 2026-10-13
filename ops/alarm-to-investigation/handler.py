@@ -43,6 +43,22 @@ def handler(event, _ctx):
         "Kubernetes resources, ConfigMaps) and dependencies. Propose a mitigation plan."
     )
 
+    # Dedup: a flapping alarm (OK->ALARM->OK->ALARM) must not open a second
+    # investigation while one for the same alarm is still running.
+    title = f"[ALARM] {alarm}"[:400]
+    try:
+        tasks = client.list_backlog_tasks(agentSpaceId=AGENT_SPACE_ID).get("tasks", [])
+        active = [t for t in tasks if t.get("title") == title
+                  and t.get("status") in ("PENDING_START", "IN_PROGRESS", "PENDING")]
+    except Exception as exc:  # listing is best-effort; never block the investigation
+        print(json.dumps({"alarm": alarm, "dedup_check_failed": str(exc)}))
+        active = []
+    if active:
+        print(json.dumps({"alarm": alarm, "skipped": "investigation already active",
+                          "taskId": active[0].get("taskId")}))
+        return {"skipped": True, "alarm": alarm, "reason": "active investigation",
+                "taskId": active[0].get("taskId")}
+
     # Idempotent per alarm transition: one task per alarm + state change timestamp
     token = f"{alarm}-{state.get('timestamp', '')}".replace(":", "").replace(".", "")[:128]
 
@@ -50,7 +66,7 @@ def handler(event, _ctx):
         agentSpaceId=AGENT_SPACE_ID,
         taskType="INVESTIGATION",
         priority="HIGH",
-        title=f"[ALARM] {alarm}"[:400],
+        title=title,
         description=description[:10000],
         clientToken=token,
     )

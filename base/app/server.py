@@ -65,9 +65,9 @@ def remember_order(key, order_id):
 
 
 def render_receipt(order_id):
-    """Pre-rendered receipt returned to retrying clients (HTML-ish, ~12 KB)."""
+    """Pre-rendered receipt returned to retrying clients (HTML-ish, ~30 KB)."""
     lines = [f"<h1>Order {order_id}</h1>"]
-    for i in range(60):
+    for i in range(200):
         lines.append(f"<tr><td>SKU-{random.randint(10000, 99999)}</td><td>Item {i:02d} description "
                      f"{uuid.uuid4().hex}{uuid.uuid4().hex}</td><td>{random.randint(1, 5)}</td>"
                      f"<td>{random.uniform(5, 500):.2f}</td></tr>")

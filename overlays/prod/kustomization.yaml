@@ -16,7 +16,7 @@ configMapGenerator:
   - name: checkout-api-config
     behavior: merge
     literals:
-      - REDIS_HOST=redis
+      - REDIS_HOST=redis-cache
       - ERROR_RATE=0
       - LATENCY_MS=20
-      - APP_VERSION=1.0.0
+      - APP_VERSION=1.1.0

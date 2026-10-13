@@ -20,7 +20,7 @@ Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalida
 | **EventBridge → Lambda `checkout-demo-alarm-to-investigation`** | Regra escuta os 3 alarmes → Lambda chama `CreateBacklogTask(INVESTIGATION)`. Não abre investigação nova se já houver uma em andamento para o mesmo alarme. | Faz a investigação abrir **sozinha**. Pra quem usa PagerDuty/Datadog/Grafana a integração é nativa e nem precisa da Lambda. |
 | **Agent Space `checkout-devops-demo`** | Escopo do agente: conta associada via role `DevOpsAgentRole-AgentSpace` (read-only, `AIDevOpsAgentAccessPolicy`). | Onde moram investigações, skills, memórias, regras, custom agents. |
 | **`scripts/gh-commit.py`** | Commita no GitHub pela API REST (sem `git push`, bloqueado nesta máquina). | É o "git push" da demo. |
-| **`scripts/investigation-tail.py`** | Tail da investigação no terminal via API do DevOps Agent. | Mostra que tudo que a UI faz é API — e serve de fallback se a UI demorar. |
+| **`scripts/demo.sh`** | Um subcomando por momento da demo: `status`, `break-memory`, `break-latency`, `force-alarm`, `watch`, `tail`, `fix-pr`, `merge`, `reset`. Usa `gh-commit.py` e `investigation-tail.py` por baixo. | Zero `sed` ao vivo. Todo passo continua passando por Git + ArgoCD. |
 | **`agent-space/` + `scripts/apply-agent-space.py`** | Skills, memória, custom agent e trigger como arquivos no repo, aplicados pela Asset API (`create-asset` / `create-trigger`). | Argumento central da Parte 3: o comportamento do agente é código versionado, não configuração clicada. |
 
 **Cenário principal (A) — "right-sizing" que mata o pod.** Commit plausível baixa `limits.memory` de 128Mi para 56Mi. O pod sobe, fica Ready e serve ~3 min; o cache de idempotência cresce, estoura o limite, **OOMKilled**, restart, `CrashLoopBackOff` com janelas de `status=000` no cliente (26 de 73 requests num intervalo de 30 s no ensaio). Intermitente, não binário. Ensaio 13/10 18:35 UTC: alarme de restarts → investigação automática → o agente **reconstruiu o histórico de mudanças pelos ReplicaSets** (sem GitHub conectado), confirmou pelo kernel log do dataplane `oom-kill constraint=CONSTRAINT_MEMCG` (limite do container, não pressão do nó), cruzou `anon-rss≈48 MB` com o limite de 56Mi e propôs reverter para 128Mi via commit GitOps. Declarou o gap ("repositório não associado, diffs fora da mesa").
@@ -41,8 +41,8 @@ watch -n2 "kubectl --context \$CTX get pods -n checkout; echo; kubectl --context
 # T2 — o que o usuário vê (status HTTP do loadgen)
 kubectl --context $CTX logs -n checkout deploy/loadgen -f | awk '{print $NF}'
 
-# T3 — repo + helpers
-cd ~/checkout-devops-demo
+# T3 — repo + helpers (todos os passos da demo são `scripts/demo.sh <subcomando>`)
+cd ~/checkout-devops-demo && scripts/demo.sh status
 
 # T4 — Kiro CLI (Parte 4)
 cd ~/checkout-devops-demo && kiro-cli chat
@@ -88,12 +88,10 @@ Checklist:
 **Faça:**
 
 ```bash
-sed -i '' 's/            memory: 64Mi/            memory: 48Mi/; s/            memory: 128Mi/            memory: 56Mi/' overlays/prod/kustomization.yaml
-grep -n 'memory:' overlays/prod/kustomization.yaml
-python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo main \
-  "perf(prod): right-size checkout-api after load test (64Mi/128Mi -> 48Mi/56Mi)" overlays/prod/kustomization.yaml
-kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
+scripts/demo.sh break-memory      # edita o overlay (48Mi/56Mi), commita via API e pede refresh no ArgoCD
 ```
+
+O script imprime o diff das linhas `memory:` e a URL do commit — mostre as duas coisas na tela. (Equivalente manual: `sed` no overlay + `scripts/gh-commit.py` + annotate `refresh=hard`; está em `scripts/demo.sh`.)
 
 **Diga:** "Mensagem de commit plausível — teve load test, o pod usa 45 MB, alguém cortou o limite pela metade pra economizar. Passou no review." Em ~30 s T1 mostra o rollout; os pods novos ficam `1/1 Running` e T2 continua `200`. "Deploy verde. Rollout concluído. Todo mundo foi almoçar."
 
@@ -113,7 +111,7 @@ O primeiro OOM leva ~3 min e o alarme de restarts até 1 min depois. Use esse te
 
 Quando T1 mostrar o primeiro `OOMKilled`/`r=1`: "Aí está. Três minutos depois do deploy verde."
 
-**Plano B:** se em 5 min nenhum pod reiniciou: `aws cloudwatch set-alarm-state --alarm-name checkout-api-container-restarts --state-value ALARM --state-reason demo` (dispara o EventBridge de verdade).
+**Plano B:** se em 5 min nenhum pod reiniciou: `scripts/demo.sh force-alarm restarts` (põe o alarme em ALARM e dispara o EventBridge de verdade; mostra o backlog em seguida).
 
 ### 2.2 A investigação abre sozinha (2 min) — Onde: aba A → Backlog
 
@@ -126,7 +124,7 @@ Quando T1 mostrar o primeiro `OOMKilled`/`r=1`: "Aí está. Três minutos depois
 Em T3, deixar rodando pra espiar entre passos:
 
 ```bash
-python3 scripts/investigation-tail.py --n 8
+scripts/demo.sh tail 8            # últimas 8 mensagens da investigação mais recente (ou: scripts/demo.sh watch)
 ```
 
 ---
@@ -191,7 +189,7 @@ kubectl --context $CTX get pods -n checkout -l project=checkout-api
 ### 3.5 Espiar a investigação (1 min) — Onde: T3
 
 ```bash
-python3 scripts/investigation-tail.py --n 8
+scripts/demo.sh tail 8            # últimas 8 mensagens da investigação mais recente (ou: scripts/demo.sh watch)
 ```
 
 **Diga:** o que já apareceu ("ele já achou o ConfigMap", etc.). Se ainda não concluiu, continue no 3.6; senão pule pra Parte 4.
@@ -295,9 +293,7 @@ Mostrar o plano chegando via MCP. Depois:
 **Plano B:** fazer em T3:
 
 ```bash
-sed -i '' 's/            memory: 48Mi/            memory: 64Mi/; s/            memory: 56Mi/            memory: 128Mi/' overlays/prod/kustomization.yaml
-python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/memory-limit "fix(prod): revert checkout-api right-sizing (OOMKilled under load)" overlays/prod/kustomization.yaml
-gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/memory-limit --title "fix(prod): revert checkout-api right-sizing" --body "Mitigação da investigação [ALARM] checkout-api-container-restarts: limite de 56Mi abaixo do uso real (~48 MB anon + cache)."
+scripts/demo.sh fix-pr            # branch fix/memory-limit + commit via API + gh pr create
 ```
 
 ### 5.2 O PR (2 min) — Onde: aba B
@@ -309,8 +305,7 @@ gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/memory-limit
 ### 5.3 Merge → ArgoCD → verde (3 min) — Onde: T3, T1, T2
 
 ```bash
-gh pr merge --repo hellenavilarosa/checkout-devops-demo fix/memory-limit --squash --delete-branch
-kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
+scripts/demo.sh merge             # squash-merge do PR fix/memory-limit + refresh no ArgoCD
 ```
 
 T1: rollout, restarts zeram. T2: só `200`. Alarme de restarts volta a `OK` em até 5 min (mostrar na discussão).
@@ -355,9 +350,9 @@ Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Part
 
 | Se falhar… | Faça |
 |---|---|
-| Nenhum OOM em 5 min | `aws cloudwatch set-alarm-state --alarm-name checkout-api-container-restarts --state-value ALARM --state-reason demo` |
+| Nenhum OOM em 5 min | `scripts/demo.sh force-alarm restarts` |
 | Investigação não abre sozinha | Aba A → Backlog → *New investigation* → colar o título `[ALARM] checkout-api-container-restarts`. |
-| Quer um segundo incidente ao vivo | Cenário B: `sed -i '' 's#FRAUD_CHECK_URL=$#FRAUD_CHECK_URL=http://10.255.255.1:8443/score#; s/APP_VERSION=1.0.0/APP_VERSION=1.1.0/' overlays/prod/kustomization.yaml` + commit "feat(prod): enable fraud scoring before checkout (v1.1.0)". Latência vai a 3 s em 1 min, alarme p99 em ~3 min. |
+| Quer um segundo incidente ao vivo | `scripts/demo.sh break-latency` (cenário B). Latência vai a 3 s em 1 min, alarme p99 em ~3 min. Depois `scripts/demo.sh reset`. |
 | Investigação lenta | Aba E (ensaio de 13/10). Mesma sequência da Parte 4. |
 | Kiro CLI sem MCP | `scripts/investigation-tail.py` (mesma API) + PR manual do 5.1. |
 | Sem internet | Vídeo de 90 s + repo local. |
@@ -365,10 +360,8 @@ Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Part
 ## Reset pós-demo
 
 ```bash
-# volta tudo ao baseline (resources, fraud desligado, versão)
-sed -i '' 's/            memory: 48Mi/            memory: 64Mi/; s/            memory: 56Mi/            memory: 128Mi/; s#FRAUD_CHECK_URL=http://10.255.255.1:8443/score#FRAUD_CHECK_URL=#; s/APP_VERSION=1.1.0/APP_VERSION=1.0.0/' overlays/prod/kustomization.yaml
-python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo main "chore(prod): restore baseline after demo" overlays/prod/kustomization.yaml
-kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
+scripts/demo.sh reset             # resources 64Mi/128Mi, fraud desligado, v1.0.0, reativa ações dos alarmes
+scripts/demo.sh status            # confere: 3 alarmes OK, pods sem restart, loadgen 200/0.03s
 ```
 
 ---

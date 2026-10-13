@@ -23,4 +23,11 @@ configMapGenerator:
 
 commonLabels:
   app.kubernetes.io/part-of: checkout
-  project: checkout-api
+
+# Project tag on metadata + pod templates only (not on selectors, which are immutable)
+labels:
+  - pairs:
+      project: checkout-api
+      owner: platform-team
+    includeSelectors: false
+    includeTemplates: true

@@ -51,7 +51,7 @@ Checklist:
 
 - [ ] `overlays/prod/kustomization.yaml` saudável: `REDIS_HOST=redis`, `APP_VERSION=1.0.0`. Alarme `OK`. T2 mostrando `200`.
 - [ ] Web app logado no Agent Space `checkout-devops-demo`.
-- [ ] **[GitHub]** Conta allowlistada como *3P only* no portal interno, GitHub registrado e repo conectado ao Agent Space. Sem isso a demo roda igual; o agente acha a causa pelo ConfigMap/ArgoCD em vez de apontar o commit. Itens marcados **[GitHub]** abaixo dependem disso.
+- [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
 - [ ] Skill `runbook-argocd-rollback` e custom agent `eks-daily-health` criados (textos no Apêndice A).
 - [ ] Kiro CLI com o power do DevOps Agent: em `kiro-cli chat`, `/tools` lista ferramentas do DevOps Agent.
 - [ ] `gh auth status` OK.
@@ -121,9 +121,9 @@ Tudo na aba A. Diga uma vez: "Agora a parte que muda a relação de vocês com a
 
 ### 3.1 Skills em Git (4 min) — Onde: Knowledge → Skills
 
-**Faça:** abrir `runbook-argocd-rollback` (pré-criada). Mostrar que é Markdown: quando aplicar, passos, o que NÃO fazer. **[GitHub]** mostrar o repo de skills conectado.
+**Faça:** abrir `runbook-argocd-rollback` (pré-criada). Mostrar que é Markdown: quando aplicar, passos, o que NÃO fazer.
 
-**Diga:** "Isto é o runbook de vocês virando comportamento do agente. Mudou o runbook no Git, mudou o agente — com PR, review e blame. Não é prompt solto."
+**Diga:** "Isto é o runbook de vocês virando comportamento do agente. É Markdown, então vocês versionam no repo de vocês e sincronizam com o Agent Space — mudou o runbook, mudou o agente, com PR, review e blame. Não é prompt solto."
 
 Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no backlog, ex. *Agent Space Understanding*). **Diga:** "Ele estudou o ambiente antes do primeiro incidente."
 
@@ -179,7 +179,7 @@ Apontar, nesta ordem:
 2. **O achado inesperado** (não pular): uma **segunda mudança** — readiness probe de `/health` para `/ready` — foi o que deixou o pod ruim ficar `Ready` e receber tráfego. **Diga:** "Ninguém pediu isso. Ele correlacionou dois commits e explicou por que o rollout passou."
 3. **O que ele não conseguiu** — não leu o `syncPolicy` da Application por RBAC, e disse isso. **Diga:** "Ele declara os limites em vez de inventar. Pra confiar num agente em produção isso importa mais que acertar."
 4. **Plano de mitigação** — reverter `REDIS_HOST` via commit; por que `kubectl rollout undo` não resolve (self-heal); follow-up da probe.
-5. **[GitHub]** o commit `chore(prod): point checkout-api at the new redis-cache service` apontado como culpado, com diff.
+5. **Como ele chegou no commit sem ler o GitHub** — pelo histórico de sync do ArgoCD (`status.history`, revisão anterior vs. atual) e pelo valor antigo do ConfigMap. **Diga:** "Com o GitHub conectado ele ainda traz o diff e o autor; aqui ele chegou lá pelo ArgoCD."
 
 ### 4.2 Chat na investigação (2 min) — Onde: campo de chat da investigação
 
@@ -227,9 +227,11 @@ python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/redis-host
 gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/redis-host --title "fix(prod): restore REDIS_HOST=redis" --body "Mitigação da investigação [ALARM] checkout-api-error-rate."
 ```
 
-### 5.2 PR e release management (2 min) — Onde: aba B
+### 5.2 O PR (2 min) — Onde: aba B
 
-**Faça:** abrir o PR. **[GitHub]** mostrar o check/comentário de release readiness do DevOps Agent avaliando risco da mudança. Sem GitHub conectado: mostrar o PR e dizer que o release management (preview) é o próximo passo do lado "change".
+**Faça:** abrir o PR. Mostrar a descrição referenciando a investigação e o diff de uma linha.
+
+**Diga:** "O lado *change* do agente — release management, em preview — entra aqui: com o repo conectado ele avalia o risco do PR antes do merge, lê dependências e testes. Hoje não vou mostrar porque esta conta não tem a integração habilitada; é o próximo passo natural depois do que vocês viram."
 
 ### 5.3 Merge → ArgoCD → verde (3 min) — Onde: T3, T1, T2
 
@@ -258,7 +260,7 @@ git push ──► ArgoCD ──► EKS ──► Container Insights ──► A
 
 Três frases:
 1. "Investigou em 9 minutos, achou a causa e um fator contribuinte que ninguém pediu."
-2. "Vocês programam o comportamento com runbooks em Git, memórias e regras — não com prompt."
+2. "Vocês programam o comportamento com runbooks, memórias e regras — não com prompt."
 3. "Pode estar incluso no plano de Support de vocês." *(confirmar o tier antes)*
 
 Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Parte 3) e o alarme em `OK`.
@@ -272,6 +274,7 @@ Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Part
 | Dados saem da conta? | Agent Space é isolado por conta; telemetria é lida via role, não copiada. |
 | Custo? | Pode estar incluso em Business/Enterprise Support (confirmar); fora disso, por uso. |
 | Como plugo nossos agentes? | A2A: `register-service remoteagent` + A2A server do DevOps Agent. Sub-agentes em qualquer framework. |
+| E a integração com GitHub/GitLab? | Nativa (GitHub App ou PAT; GitLab.com e self-hosted). Dá ao agente diff, autor e PRs; habilita release management e skills sincronizadas de repo. Não está nesta demo por restrição da conta usada, não do produto. |
 
 ---
 

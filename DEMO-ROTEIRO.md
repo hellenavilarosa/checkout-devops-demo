@@ -12,18 +12,20 @@ Como ler este roteiro: cada passo tem **O que é** (explicação da funcionalida
 
 | Componente | O que é | Por que está na demo |
 |---|---|---|
-| **App `checkout-api`** (ns `checkout`) | API Python com `/checkout` (usa Redis), `/health`, `/ready`, `/metrics`. Logs em JSON. 2 réplicas + `redis` + `loadgen` (~5 req/s). | App limpa e realista. Toda a falha é injetada via Git, nunca via `kubectl`. |
+| **App `checkout-api`** (ns `checkout`) | API Python com `/checkout` (Redis + fraud-scoring opcional), `/health`, `/ready`, `/metrics`. Logs JSON com `latency_ms`. Cache de idempotência em memória (TTL 5 min) — por isso a memória cresce ~4 MiB/min após cada restart. 2 réplicas + `redis` + `loadgen` (~5 req/s, imprime status e tempo). | App limpa e realista. Toda a falha é injetada via Git, nunca via `kubectl`. |
 | **Repo GitOps** `checkout-devops-demo` | Kustomize: `base/` (manifests + código) e `overlays/prod/` (ConfigMap com `REDIS_HOST`, `APP_VERSION`). | Espelha o fluxo do cliente: tudo entra por Git. |
 | **ArgoCD Application `checkout-api`** | Auto-sync + self-heal + prune, aponta pro repo acima. | Quando o commit ruim entra, o ArgoCD aplica sozinho. Self-heal também impede `kubectl rollout undo` — ponto de discussão. |
 | **Add-on `amazon-cloudwatch-observability`** | Container Insights + Fluent Bit mandando logs dos pods pro CloudWatch (`/aws/containerinsights/<cluster>/application`). | É daqui que o DevOps Agent lê métricas e logs. Sem isso ele não vê o cluster. |
-| **Metric filters + alarme `checkout-api-error-rate`** | Filtros contam requests e 5xx nos logs; metric math `100*5xx/requests > 20%` por 2 min. | Detecção. É o gatilho de tudo. |
-| **EventBridge → Lambda `checkout-demo-alarm-to-investigation`** | Regra escuta mudança de estado do alarme → Lambda chama `CreateBacklogTask(INVESTIGATION)` no Agent Space. ~50 linhas, idempotente. | Faz a investigação abrir **sozinha**. Pra quem usa PagerDuty/Datadog/Grafana a integração é nativa e nem precisa da Lambda. |
+| **3 alarmes** (tag `project=checkout-api`) | `checkout-api-container-restarts` (Container Insights, ≥1 restart em 5 min), `checkout-api-latency-p99` (metric filter em `latency_ms`, p99 > 1 s por 2 min), `checkout-api-error-rate` (5xx > 20% por 2 min). | Detecção. Cada cenário dispara um alarme diferente — e o agente tem que descobrir que tipo de falha é. |
+| **EventBridge → Lambda `checkout-demo-alarm-to-investigation`** | Regra escuta os 3 alarmes → Lambda chama `CreateBacklogTask(INVESTIGATION)`. Não abre investigação nova se já houver uma em andamento para o mesmo alarme. | Faz a investigação abrir **sozinha**. Pra quem usa PagerDuty/Datadog/Grafana a integração é nativa e nem precisa da Lambda. |
 | **Agent Space `checkout-devops-demo`** | Escopo do agente: conta associada via role `DevOpsAgentRole-AgentSpace` (read-only, `AIDevOpsAgentAccessPolicy`). | Onde moram investigações, skills, memórias, regras, custom agents. |
 | **`scripts/gh-commit.py`** | Commita no GitHub pela API REST (sem `git push`, bloqueado nesta máquina). | É o "git push" da demo. |
 | **`scripts/investigation-tail.py`** | Tail da investigação no terminal via API do DevOps Agent. | Mostra que tudo que a UI faz é API — e serve de fallback se a UI demorar. |
 | **`agent-space/` + `scripts/apply-agent-space.py`** | Skills, memória, custom agent e trigger como arquivos no repo, aplicados pela Asset API (`create-asset` / `create-trigger`). | Argumento central da Parte 3: o comportamento do agente é código versionado, não configuração clicada. |
 
-Ensaio de 13/10: alarme às 15:12 UTC → investigação criada em segundos → root cause às 15:18 → plano de mitigação às 15:23 (~9 min). O agente achou a causa (`REDIS_HOST=redis-cache`), uma **segunda mudança** que mascarou o rollout (readiness probe `/health`→`/ready`) e declarou o que não conseguiu ler por RBAC (`syncPolicy` da Application).
+**Cenário principal (A) — "right-sizing" que mata o pod.** Commit plausível baixa `limits.memory` de 128Mi para 56Mi. O pod sobe, fica Ready e serve ~3 min; o cache de idempotência cresce, estoura o limite, **OOMKilled**, restart, `CrashLoopBackOff` com janelas de `status=000` no cliente (26 de 73 requests num intervalo de 30 s no ensaio). Intermitente, não binário. Ensaio 13/10 18:35 UTC: alarme de restarts → investigação automática → o agente **reconstruiu o histórico de mudanças pelos ReplicaSets** (sem GitHub conectado), confirmou pelo kernel log do dataplane `oom-kill constraint=CONSTRAINT_MEMCG` (limite do container, não pressão do nó), cruzou `anon-rss≈48 MB` com o limite de 56Mi e propôs reverter para 128Mi via commit GitOps. Declarou o gap ("repositório não associado, diffs fora da mesa").
+
+**Cenário reserva (B) — "não está fora, está lento".** Commit `feat(prod): enable fraud scoring before checkout (v1.1.0)` aponta `FRAUD_CHECK_URL` para um upstream que não responde (IP sem rota). O código é fail-open: cada checkout espera 3 s, loga `fraud_check=timeout` e devolve 200. Erro fica em 0%, p99 vai de 25 ms para 3 s, throughput do cliente cai de 125 para 9 req/30 s. Dispara `checkout-api-latency-p99`. Use na discussão ("e um incidente de outro tipo?") ou se o A falhar.
 
 ---
 
@@ -46,11 +48,12 @@ cd ~/checkout-devops-demo
 cd ~/checkout-devops-demo && kiro-cli chat
 ```
 
-Abas do navegador, nesta ordem: **(A)** web app do DevOps Agent · **(B)** GitHub repo · **(C)** ArgoCD UI (`kubectl --context $CTX port-forward -n argocd svc/argocd-server 8080:443`) · **(D)** CloudWatch → alarme `checkout-api-error-rate` · **(E)** investigação do ensaio de 13/10 já aberta (fallback).
+Abas do navegador, nesta ordem: **(A)** web app do DevOps Agent · **(B)** GitHub repo · **(C)** ArgoCD UI (`kubectl --context $CTX port-forward -n argocd svc/argocd-server 8080:443`) · **(D)** CloudWatch → alarme `checkout-api-error-rate` · **(E)** investigação do ensaio de 13/10 (`[ALARM] checkout-api-container-restarts`, 18:29 UTC, COMPLETED) já aberta (fallback) · **(F)** investigação do cenário B (`[ALARM] checkout-api-latency-p99`, 18:52 UTC) para a discussão.
 
 Checklist:
 
-- [ ] `overlays/prod/kustomization.yaml` saudável: `REDIS_HOST=redis`, `APP_VERSION=1.0.0`. Alarme `OK`. T2 mostrando `200`.
+- [ ] `overlays/prod/kustomization.yaml` saudável: `memory: 64Mi`/`128Mi`, `FRAUD_CHECK_URL=` (vazio), `APP_VERSION=1.0.0`. Os 3 alarmes em `OK`. T2 mostrando `status=200 time=0.02s`.
+- [ ] Rodar `aws iam put-role-policy --role-name checkout-demo-alarm-to-investigation --policy-name create-investigation --policy-document file://ops/alarm-to-investigation/role-policy.json` (adiciona `ListBacklogTasks`, usado pelo dedup da Lambda).
 - [ ] Web app logado no Agent Space `checkout-devops-demo`.
 - [ ] **Sem integração GitHub no Agent Space** (restrição da conta interna). A demo não depende dela: o agente acha a causa pelo ConfigMap e pelo histórico do ArgoCD. Se perguntarem, resposta pronta na tabela do fechamento.
 - [x] Conteúdo do Agent Space já criado via API (13/10): skills `runbook-argocd-rollback` e `skip-canary-window`, memory store `checkout-directives` com 1 memória, custom agent `eks-daily-health` com trigger diário 08:00 BRT. Fonte em `agent-space/`, aplicado por `python3 scripts/apply-agent-space.py` (idempotente). Só conferir no web app que aparecem.
@@ -73,21 +76,23 @@ Checklist:
 
 **Faça:** passar rápido por T1 (pods verdes), T2 (200s), ArgoCD (Synced/Healthy), repo (`overlays/prod/kustomization.yaml`).
 
-**Diga:** "Tudo isso entra por Git. Igual a vocês. Repare no ConfigMap: `REDIS_HOST=redis`."
+**Diga:** "Tudo isso entra por Git. Igual a vocês. Repare nos resources: 64Mi de request, 128Mi de limite. O time de FinOps acha que está sobrando."
 
 ### 1.3 Quebrar via Git (2 min) — Onde: T3
 
 **Faça:**
 
 ```bash
-sed -i '' 's/REDIS_HOST=redis$/REDIS_HOST=redis-cache/; s/APP_VERSION=1.0.0/APP_VERSION=1.1.0/' overlays/prod/kustomization.yaml
-grep -nE 'REDIS_HOST|APP_VERSION' overlays/prod/kustomization.yaml
+sed -i '' 's/            memory: 64Mi/            memory: 48Mi/; s/            memory: 128Mi/            memory: 56Mi/' overlays/prod/kustomization.yaml
+grep -n 'memory:' overlays/prod/kustomization.yaml
 python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo main \
-  "chore(prod): point checkout-api at the new redis-cache service (v1.1.0)" overlays/prod/kustomization.yaml
+  "perf(prod): right-size checkout-api after load test (64Mi/128Mi -> 48Mi/56Mi)" overlays/prod/kustomization.yaml
 kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
 ```
 
-**Diga:** "Mensagem de commit plausível — alguém achou que o Redis tinha sido renomeado. Passou no review." Em ~30 s T1 mostra rollout e T2 vira `503`. "Pod `1/1 Running`. Pra o Kubernetes está tudo bem. Pra o usuário, não."
+**Diga:** "Mensagem de commit plausível — teve load test, o pod usa 45 MB, alguém cortou o limite pela metade pra economizar. Passou no review." Em ~30 s T1 mostra o rollout; os pods novos ficam `1/1 Running` e T2 continua `200`. "Deploy verde. Rollout concluído. Todo mundo foi almoçar."
+
+**O que vai acontecer (não diga ainda):** ~3 min depois o primeiro pod morre por OOMKilled, T1 mostra `r=1`, T2 mostra alguns `status=000`. A partir daí o padrão é intermitente: períodos de 200 e rajadas de `000` quando um pod reinicia em `CrashLoopBackOff`. Use esse tempo para a Parte 2.
 
 ---
 
@@ -95,21 +100,23 @@ kubectl --context $CTX annotate application checkout-api -n argocd argocd.argopr
 
 ### 2.1 Enquanto o alarme arma (3 min) — Onde: aba D, depois console EventBridge/Lambda
 
-O alarme leva ~2–3 min (janela de 2 min + propagação dos logs). Use esse tempo para mostrar o gatilho **no console**:
+O primeiro OOM leva ~3 min e o alarme de restarts até 1 min depois. Use esse tempo para mostrar o gatilho **no console**:
 
-**Faça:** CloudWatch → alarme → aba *Details* (metric math). Depois Logs → metric filters do log group `application`. Depois EventBridge → regra `checkout-demo-alarm-to-investigation` → target Lambda.
+**Faça:** CloudWatch → Alarms → os 3 alarmes `checkout-api-*` (restarts vem do Container Insights; latência e erro vêm de metric filters nos logs JSON). Abrir `checkout-api-container-restarts` → *Details*. Depois EventBridge → regra `checkout-demo-alarm-to-investigation` → target Lambda.
 
-**Diga:** "Logs dos pods vão pro CloudWatch via Container Insights. Dois metric filters contam requests e 5xx; a taxa passa de 20% por 2 minutos, o alarme dispara, o EventBridge chama uma Lambda de 50 linhas que abre uma investigação no agente. Isso é o caminho genérico. Se vocês usam PagerDuty, Datadog, Grafana, Dynatrace ou ServiceNow, a integração é nativa — não precisa nem da Lambda."
+**Diga:** "Container Insights manda métricas de pod e os logs JSON da app pro CloudWatch. Três alarmes cobrem as três famílias de falha: restarts, latência, erro. Qualquer um deles em ALARM dispara, via EventBridge, uma Lambda de 60 linhas que abre uma investigação no agente. Isso é o caminho genérico. Se vocês usam PagerDuty, Datadog, Grafana, Dynatrace ou ServiceNow, a integração é nativa — não precisa nem da Lambda."
 
-**Plano B:** se passar de 3 min: `aws cloudwatch set-alarm-state --alarm-name checkout-api-error-rate --state-value ALARM --state-reason demo` (dispara o EventBridge de verdade).
+Quando T1 mostrar o primeiro `OOMKilled`/`r=1`: "Aí está. Três minutos depois do deploy verde."
+
+**Plano B:** se em 5 min nenhum pod reiniciou: `aws cloudwatch set-alarm-state --alarm-name checkout-api-container-restarts --state-value ALARM --state-reason demo` (dispara o EventBridge de verdade).
 
 ### 2.2 A investigação abre sozinha (2 min) — Onde: aba A → Backlog
 
 **O que é:** uma *investigação* é a unidade de trabalho do agente para incidentes. Ela nasce de um gatilho (alarme, ticket, webhook, API ou manualmente) e passa por 3 fases: **Triage** (segundos: decide se investiga, se junta a uma investigação já aberta sobre o mesmo problema, ou se pula), **RCA** (coleta evidências em métricas, logs, mudanças recentes, topologia; pode disparar *sub-agentes* em paralelo, cada um com sua própria timeline) e **Mitigação** (propostas inline no fim da investigação). Tudo fica registrado na **Timeline** (cada passo de raciocínio e cada chamada de ferramenta) e resumido na aba **Summary**. O *Backlog* é a lista de tarefas do Agent Space — investigações, aprendizado do ambiente (`SYSTEM_LEARNING`), relatórios.
 
-**Faça:** mostrar a task `[ALARM] checkout-api-error-rate` aparecendo em *Backlog* (`PENDING_START` → `IN_PROGRESS`). Abrir. Mostrar as primeiras mensagens da timeline: leitura do alarme, hipóteses, subagentes `logs` / `argocd-change` / `propose-mitigation` partindo em paralelo.
+**Faça:** mostrar a task `[ALARM] checkout-api-container-restarts` aparecendo em *Backlog* (`PENDING_START` → `IN_PROGRESS`). Abrir. Mostrar as primeiras mensagens da timeline: leitura do alarme, hipóteses, sub-agentes (`app-logs`, mudanças, mitigação) partindo em paralelo.
 
-**Diga:** "Ninguém clicou em nada. O agente já está fazendo o que o on-call faz nos primeiros 5 minutos: lendo o alarme, puxando métricas, notando que o erro começou junto com um deploy. Ele leva uns 9 minutos até o plano. Enquanto ele trabalha, eu mostro como esse agente é programado — e volto pra investigação quando ela terminar."
+**Diga:** "Ninguém clicou em nada. O agente já está fazendo o que o on-call faz nos primeiros 5 minutos: lendo o alarme, puxando métricas, listando o que mudou. Ele leva uns 10 minutos até o plano. Enquanto ele trabalha, eu mostro como esse agente é programado — e volto pra investigação quando ela terminar."
 
 Em T3, deixar rodando pra espiar entre passos:
 
@@ -165,7 +172,16 @@ Abrir também a skill gerada pelo próprio agente (task `SYSTEM_LEARNING` no bac
 
 **Faça:** abrir `eks-daily-health`. Mostrar: system prompt (os 5 itens e o "never invent findings"), tools (`use_aws`, `query_cloudwatch_logs`), skill e memory store anexados, trigger `cron(0 11 * * ? *)` (08:00 BRT). Abrir *History* e mostrar o resultado do Run Now de ontem. Clicar **Run Now** de novo e deixar em background.
 
-**Diga:** "Um SRE agendado. Todo dia 8h ele revisa o cluster e entrega o relatório no Slack. Outros exemplos: queries lentas do RDS da semana, HPAs que nunca escalaram, certificados vencendo. Vocês escrevem a instrução; o agente tem as ferramentas."
+**Diga:** "Um SRE agendado. Todo dia 8h ele revisa o cluster e entrega o relatório. Outros exemplos: queries lentas do RDS da semana, HPAs que nunca escalaram, certificados vencendo. Vocês escrevem a instrução; o agente tem as ferramentas."
+
+Depois abrir **`checkout-api-specialist`** (sem schedule, sob demanda). Mostrar o system prompt: é a **descrição do projeto** — o que o checkout-api é, SLOs, arquitetura, dependências, como as mudanças chegam em produção, observabilidade, as 3 famílias de falha conhecidas — e a regra de escopo: *tudo deste projeto tem a tag `project=checkout-api` na AWS e o label `project=checkout-api` no Kubernetes*. Em T3:
+
+```bash
+aws resourcegroupstaggingapi get-resources --tag-filters Key=project,Values=checkout-api --query 'ResourceTagMappingList[].ResourceARN' --output table
+kubectl --context $CTX get pods -n checkout -l project=checkout-api
+```
+
+**Diga:** "Um agente por workload. Vocês já têm tags; a descrição do projeto é o que vocês escreveriam num README de on-call. Esse agente começa a investigação sabendo o que é o sistema, quem é dono e por onde as mudanças entram — em vez de descobrir do zero a cada incidente." Fonte: `agent-space/agents/checkout-api-specialist/AGENT.md`.
 
 ### 3.5 Espiar a investigação (1 min) — Onde: T3
 
@@ -195,29 +211,29 @@ Volte à investigação aberta na aba A. Se ainda não terminou, use a aba E (en
 
 Apontar, nesta ordem:
 
-1. **Root cause** — ConfigMap `REDIS_HOST: redis-cache`; confirma que não existe Service `redis-cache` no ns `checkout`; 100% dos erros são `Name does not resolve`.
-2. **O achado inesperado** (não pular): uma **segunda mudança** — readiness probe de `/health` para `/ready` — foi o que deixou o pod ruim ficar `Ready` e receber tráfego. **Diga:** "Ninguém pediu isso. Ele correlacionou dois commits e explicou por que o rollout passou."
-3. **O que ele não conseguiu** — não leu o `syncPolicy` da Application por RBAC, e disse isso. **Diga:** "Ele declara os limites em vez de inventar. Pra confiar num agente em produção isso importa mais que acertar."
-4. **Plano de mitigação** — reverter `REDIS_HOST` via commit; por que `kubectl rollout undo` não resolve (self-heal); follow-up da probe.
-5. **Como ele chegou no commit sem ler o GitHub** — pelo histórico de sync do ArgoCD (`status.history`, revisão anterior vs. atual) e pelo valor antigo do ConfigMap. **Diga:** "Com o GitHub conectado ele ainda traz o diff e o autor; aqui ele chegou lá pelo ArgoCD."
+1. **Separar as hipóteses** — o alarme é "restarts"; o agente precisa decidir entre pressão do nó, liveness probe falhando, crash da app ou OOM. Mostrar onde ele vai aos **eventos do Kubernetes** e ao **kernel log do dataplane** (`/aws/containerinsights/.../dataplane`) e acha `oom-kill constraint=CONSTRAINT_MEMCG`. **Diga:** "Não é o nó. É o limite do container. Essa distinção é o que separa 10 minutos de 2 horas."
+2. **Reconstruir o que mudou sem ler o Git** — ele percorre os **ReplicaSets** do Deployment e compara os pod templates: "a revisão 14, criada às 18:35, baixou o limite para 56Mi". **Diga:** "O repo não está conectado neste Agent Space — ele disse isso explicitamente e foi buscar a história onde ela estava: nos ReplicaSets e no histórico do ArgoCD. Com o GitHub conectado ele ainda traria diff e autor."
+3. **Fechar a conta** — `anon-rss≈48 MB` no momento do kill, limite 56Mi, memória crescendo desde o start por causa do cache de pedidos. **Diga:** "Ele não parou em 'OOMKilled'. Explicou por que o pod passava no rollout e morria 3 minutos depois."
+4. **O que ele não conseguiu** — git diff indisponível; algum campo por RBAC. Ele declara. **Diga:** "Ele declara os limites em vez de inventar. Pra confiar num agente em produção isso importa mais que acertar."
+5. **Plano de mitigação** — reverter o limite para 128Mi via commit GitOps; por que `kubectl edit` não resolve (self-heal); follow-up: request/limit baseados em p99 de memória, não em média.
 
 ### 4.2 Chat na investigação (2 min) — Onde: *Chat with investigation*, na página da investigação
 
 **O que é:** você manda mensagens **para a investigação** (não para um chat genérico). Se ela estiver rodando, a mensagem entra numa fila (*Queued requests*) e o agente a pega entre passos de raciocínio — serve para *steering* ("olhe também o CoreDNS"). Se já concluiu, a mensagem **reabre** a investigação com todo o contexto. Mesma mecânica funciona via Slack (uma thread por investigação) e via MCP/A2A.
 
 **Cole, um por vez:**
-> Quantas requests de checkout falharam desde o início do incidente e qual seria o impacto estimado se ele durasse 1 hora?
+> Quantas requests de checkout falharam desde o primeiro OOMKilled e qual seria o impacto estimado se isso durasse 1 hora?
 
-> Por que o Kubernetes mostrava o pod como Running e Ready se ele não conseguia falar com o Redis?
+> Por que o pod passou no rollout e ficou Ready se o limite de memória estava baixo demais? Em quanto tempo ele morria depois de subir?
 
 **Diga:** "Mesmo chat funciona no Slack, uma thread por investigação."
 
-### 4.3 Fork (2 min) — Onde: Timeline → ícone de ramificação *Fork from here* ao lado da mensagem em que ele decide investigar o ConfigMap
+### 4.3 Fork (2 min) — Onde: Timeline → ícone de ramificação *Fork from here* ao lado da mensagem em que ele decide investigar o limite de memória
 
 **O que é:** (lançado em 2/10) uma *fork* é uma **nova investigação que herda a história até aquela mensagem** e segue outra direção, sem alterar a original. Você descreve em *Fork starting point* o que investigar diferente. A fork abre com link *Forked from* para o pai e *Show parent steps* para ver o herdado; a mensagem original passa a mostrar "N forks from this message". Serve para testar hipótese alternativa ou discordar do agente sem perder o trabalho feito.
 
 **Cole na fork:**
-> Investigue a hipótese alternativa: falha de resolução DNS no CoreDNS do cluster afetando todos os pods, e não apenas uma configuração errada do checkout-api. Compare com a evidência já coletada.
+> Investigue a hipótese alternativa: pressão de memória no nó (outros workloads do cluster competindo), e não o limite do container. Compare com a evidência já coletada e diga qual hipótese os kernel logs sustentam.
 
 **Diga:** "A fork parte do mesmo contexto até aquele ponto e roda em paralelo. Vocês discordam de uma hipótese sem jogar fora o trabalho."
 
@@ -243,16 +259,16 @@ Apontar, nesta ordem:
 Mostrar o plano chegando via MCP. Depois:
 
 **Cole no Kiro CLI:**
-> Aplique a mitigação neste repositório: corrija `overlays/prod/kustomization.yaml` conforme o plano, mantendo APP_VERSION. Crie o branch fix/redis-host, commite com `python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/redis-host "<mensagem>" overlays/prod/kustomization.yaml` e abra um PR com `gh pr create` cuja descrição referencie a investigação e resuma a causa.
+> Aplique a mitigação neste repositório: corrija os resources em `overlays/prod/kustomization.yaml` conforme o plano. Crie o branch fix/memory-limit, commite com `python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/memory-limit "<mensagem>" overlays/prod/kustomization.yaml` e abra um PR com `gh pr create` cuja descrição referencie a investigação e resuma a causa.
 
 **Diga:** "O mesmo agente que investigou está sendo consumido de dentro da ferramenta do dev, headless, via MCP. Dá pra fazer isso de um pipeline, de um bot do Slack, de qualquer agente de vocês via A2A."
 
 **Plano B:** fazer em T3:
 
 ```bash
-sed -i '' 's/REDIS_HOST=redis-cache/REDIS_HOST=redis/' overlays/prod/kustomization.yaml
-python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/redis-host "fix(prod): restore REDIS_HOST=redis" overlays/prod/kustomization.yaml
-gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/redis-host --title "fix(prod): restore REDIS_HOST=redis" --body "Mitigação da investigação [ALARM] checkout-api-error-rate."
+sed -i '' 's/            memory: 48Mi/            memory: 64Mi/; s/            memory: 56Mi/            memory: 128Mi/' overlays/prod/kustomization.yaml
+python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo fix/memory-limit "fix(prod): revert checkout-api right-sizing (OOMKilled under load)" overlays/prod/kustomization.yaml
+gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/memory-limit --title "fix(prod): revert checkout-api right-sizing" --body "Mitigação da investigação [ALARM] checkout-api-container-restarts: limite de 56Mi abaixo do uso real (~48 MB anon + cache)."
 ```
 
 ### 5.2 O PR (2 min) — Onde: aba B
@@ -264,11 +280,11 @@ gh pr create --repo hellenavilarosa/checkout-devops-demo --head fix/redis-host -
 ### 5.3 Merge → ArgoCD → verde (3 min) — Onde: T3, T1, T2
 
 ```bash
-gh pr merge --repo hellenavilarosa/checkout-devops-demo fix/redis-host --squash --delete-branch
+gh pr merge --repo hellenavilarosa/checkout-devops-demo fix/memory-limit --squash --delete-branch
 kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
 ```
 
-T1: rollout. T2: `200`. Alarme volta a `OK` em ~2 min (mostrar na discussão).
+T1: rollout, restarts zeram. T2: só `200`. Alarme de restarts volta a `OK` em até 5 min (mostrar na discussão).
 
 **Diga:** "Único toque humano: o merge. Detecção, diagnóstico, correção e deploy — tudo automatizado e auditável no Git."
 
@@ -287,11 +303,11 @@ git push ──► ArgoCD ──► EKS ──► Container Insights ──► A
 ```
 
 Três frases:
-1. "Investigou em 9 minutos, achou a causa e um fator contribuinte que ninguém pediu."
+1. "Investigou em 10 minutos, separou 'limite do container' de 'pressão do nó' e reconstruiu o que mudou sem ter acesso ao Git."
 2. "Vocês programam o comportamento com runbooks, memórias e regras — não com prompt."
 3. "Pode estar incluso no plano de Support de vocês." *(confirmar o tier antes)*
 
-Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Parte 3) e o alarme em `OK`.
+Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Parte 3) e o alarme em `OK`. Se perguntarem "e se não fosse crash, fosse lentidão?": abrir a aba **(F)** com a investigação do cenário B (latência p99 de 3 s com erro em 0% — `fraud_check=timeout` nos logs, upstream sem rota) e ler o resumo.
 
 | Pergunta provável | Resposta curta |
 |---|---|
@@ -310,8 +326,9 @@ Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Part
 
 | Se falhar… | Faça |
 |---|---|
-| Alarme não dispara em 3 min | `aws cloudwatch set-alarm-state --alarm-name checkout-api-error-rate --state-value ALARM --state-reason demo` |
-| Investigação não abre sozinha | Aba A → Backlog → *New investigation* → colar o título `[ALARM] checkout-api-error-rate`. |
+| Nenhum OOM em 5 min | `aws cloudwatch set-alarm-state --alarm-name checkout-api-container-restarts --state-value ALARM --state-reason demo` |
+| Investigação não abre sozinha | Aba A → Backlog → *New investigation* → colar o título `[ALARM] checkout-api-container-restarts`. |
+| Quer um segundo incidente ao vivo | Cenário B: `sed -i '' 's#FRAUD_CHECK_URL=$#FRAUD_CHECK_URL=http://10.255.255.1:8443/score#; s/APP_VERSION=1.0.0/APP_VERSION=1.1.0/' overlays/prod/kustomization.yaml` + commit "feat(prod): enable fraud scoring before checkout (v1.1.0)". Latência vai a 3 s em 1 min, alarme p99 em ~3 min. |
 | Investigação lenta | Aba E (ensaio de 13/10). Mesma sequência da Parte 4. |
 | Kiro CLI sem MCP | `scripts/investigation-tail.py` (mesma API) + PR manual do 5.1. |
 | Sem internet | Vídeo de 90 s + repo local. |
@@ -319,9 +336,9 @@ Durante a discussão: mostrar o resultado do `eks-daily-health` (Run now da Part
 ## Reset pós-demo
 
 ```bash
-# se o PR não foi mergeado
-sed -i '' 's/REDIS_HOST=redis-cache/REDIS_HOST=redis/; s/APP_VERSION=1.1.0/APP_VERSION=1.0.0/' overlays/prod/kustomization.yaml
-python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo main "chore(prod): restore REDIS_HOST=redis" overlays/prod/kustomization.yaml
+# volta tudo ao baseline (resources, fraud desligado, versão)
+sed -i '' 's/            memory: 48Mi/            memory: 64Mi/; s/            memory: 56Mi/            memory: 128Mi/; s#FRAUD_CHECK_URL=http://10.255.255.1:8443/score#FRAUD_CHECK_URL=#; s/APP_VERSION=1.1.0/APP_VERSION=1.0.0/' overlays/prod/kustomization.yaml
+python3 scripts/gh-commit.py hellenavilarosa/checkout-devops-demo main "chore(prod): restore baseline after demo" overlays/prod/kustomization.yaml
 kubectl --context $CTX annotate application checkout-api -n argocd argocd.argoproj.io/refresh=hard --overwrite
 ```
 
@@ -338,6 +355,7 @@ Tudo abaixo já existe no Agent Space, criado por `scripts/apply-agent-space.py`
 | memory store `checkout-directives` | — | `ki-ecd1a491-…` |
 | memory `services/checkout-api/deployment-conventions` | `agent-space/memories/checkout-gitops-conventions.md` | `ki-d9e1e6aa-…` |
 | custom agent `eks-daily-health` | `agent-space/agents/eks-daily-health/AGENT.md` | `ki-46b44c1a-…` |
+| custom agent `checkout-api-specialist` (sob demanda, escopo por tag `project=checkout-api`) | `agent-space/agents/checkout-api-specialist/AGENT.md` | `ki-163df40a-…` |
 | trigger diário 11:00 UTC → `custom:ki-46b44c1a-…` | — | `goal-5157eda1-…` |
 
 ### Skill `runbook-argocd-rollback`

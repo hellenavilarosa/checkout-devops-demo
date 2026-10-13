@@ -7,11 +7,11 @@ resources:
   - ../../base
   - namespace.yaml
 
-# Production values. To inject a fault for the demo, change a value here,
-# commit, and let ArgoCD sync. Examples:
-#   REDIS_HOST=redis   -> dependency misconfig, /checkout returns 503
-#   ERROR_RATE=0.6           -> partial failure, 60% of /checkout return 500
-#   LATENCY_MS=1500          -> latency regression
+# Production values. Faults are injected by changing a value here, committing,
+# and letting ArgoCD sync (never kubectl). Demo scenarios:
+#   A) limits.memory 128Mi -> 56Mi  "right-sizing" -> OOMKilled, restarts, partial failures
+#   B) FRAUD_CHECK_URL=http://10.255.255.1:8443/score  slow upstream -> p99 latency, errors stay low
+#   Simpler faults that also work: REDIS_HOST=redis-cache, ERROR_RATE=0.6, LATENCY_MS=1500
 configMapGenerator:
   - name: checkout-api-config
     behavior: merge
@@ -20,3 +20,20 @@ configMapGenerator:
       - ERROR_RATE=0
       - LATENCY_MS=20
       - APP_VERSION=1.0.0
+      - FRAUD_CHECK_URL=
+      - FRAUD_CHECK_TIMEOUT_MS=3000
+
+patches:
+  - target:
+      kind: Deployment
+      name: checkout-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi

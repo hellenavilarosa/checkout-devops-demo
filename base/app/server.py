@@ -1,6 +1,7 @@
 """checkout-api: small HTTP service used in the DevOps Agent demo.
 
 Endpoints:
+  GET /          -> service index (name, version, list of endpoints)
   GET /health    -> 200 if Redis reachable, 503 otherwise
   GET /checkout  -> increments an order counter in Redis and returns the order id
   GET /metrics   -> Prometheus text format (requests, errors, latency)
@@ -133,7 +134,18 @@ class Handler(BaseHTTPRequestHandler):
         status, body = 404, {"error": "not found"}
         extra = {}
         try:
-            if self.path == "/ready":
+            if self.path in ("/", ""):
+                # service index: what a browser or an API test runner sees first
+                status, body = 200, {
+                    "service": "checkout-api", "version": APP_VERSION,
+                    "endpoints": {
+                        "/health": "200 if Redis is reachable, 503 otherwise",
+                        "/ready": "process-level readiness",
+                        "/checkout": "creates an order and returns its id (GET; honours Idempotency-Key)",
+                        "/metrics": "Prometheus text format",
+                    },
+                }
+            elif self.path == "/ready":
                 # process-level readiness: the server is up and accepting connections
                 status, body = 200, {"status": "ready"}
             elif self.path == "/health":

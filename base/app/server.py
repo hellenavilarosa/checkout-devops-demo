@@ -12,6 +12,9 @@ injected through Git / ArgoCD instead of kubectl):
   ERROR_RATE   0.0-1.0 fraction of /checkout calls that fail with 500
   LATENCY_MS   artificial latency added to every /checkout call
   APP_VERSION  echoed in logs and headers
+  IDEMPOTENCY_TTL_S       how long completed orders (with their receipt) are kept
+                          in memory so client retries get the same order id
+                          (default 300). Memory grows with traffic until the TTL.
   FRAUD_CHECK_URL         optional fraud-scoring endpoint called before each
                           checkout; empty = disabled
   FRAUD_CHECK_TIMEOUT_MS  timeout for the fraud call (default 3000); on timeout
@@ -39,11 +42,36 @@ ERROR_RATE = float(os.getenv("ERROR_RATE", "0"))
 LATENCY_MS = int(os.getenv("LATENCY_MS", "0"))
 APP_VERSION = os.getenv("APP_VERSION", "dev")
 PORT = int(os.getenv("PORT", "8080"))
+IDEMPOTENCY_TTL_S = int(os.getenv("IDEMPOTENCY_TTL_S", "300"))
 FRAUD_CHECK_URL = os.getenv("FRAUD_CHECK_URL", "").strip()
 FRAUD_CHECK_TIMEOUT_MS = int(os.getenv("FRAUD_CHECK_TIMEOUT_MS", "3000"))
 
 # Simple in-process counters exposed on /metrics
 METRICS = {"requests_total": 0, "errors_total": 0, "latency_ms_sum": 0.0}
+
+# Idempotency cache: order id -> (expires_at, receipt). Lets a client that retries
+# with the same Idempotency-Key get the same order back. Entries live IDEMPOTENCY_TTL_S.
+RECENT_ORDERS = {}
+
+
+def remember_order(key, order_id):
+    now = time.time()
+    if len(RECENT_ORDERS) % 500 == 0:  # cheap periodic sweep of expired entries
+        for k in [k for k, (exp, _) in RECENT_ORDERS.items() if exp < now]:
+            RECENT_ORDERS.pop(k, None)
+    receipt = render_receipt(order_id)
+    RECENT_ORDERS[key] = (now + IDEMPOTENCY_TTL_S, receipt)
+    return receipt
+
+
+def render_receipt(order_id):
+    """Pre-rendered receipt returned to retrying clients (HTML-ish, ~12 KB)."""
+    lines = [f"<h1>Order {order_id}</h1>"]
+    for i in range(60):
+        lines.append(f"<tr><td>SKU-{random.randint(10000, 99999)}</td><td>Item {i:02d} description "
+                     f"{uuid.uuid4().hex}{uuid.uuid4().hex}</td><td>{random.randint(1, 5)}</td>"
+                     f"<td>{random.uniform(5, 500):.2f}</td></tr>")
+    return "\n".join(lines)
 
 
 def log(level, msg, **fields):
@@ -119,8 +147,15 @@ class Handler(BaseHTTPRequestHandler):
                 fraud, fraud_ms = fraud_score(request_id)
                 if fraud != "disabled":
                     extra = {"fraud_check": fraud, "fraud_ms": round(fraud_ms, 1)}
-                order_no = redis_cmd("INCR", "orders:total")
-                status, body = 200, {"order_id": f"ORD-{int(order_no):08d}"}
+                idem_key = self.headers.get("Idempotency-Key") or request_id
+                hit = RECENT_ORDERS.get(idem_key)
+                if hit and hit[0] > time.time():
+                    status, body = 200, {"order_id": idem_key, "replayed": True}
+                else:
+                    order_no = redis_cmd("INCR", "orders:total")
+                    order_id = f"ORD-{int(order_no):08d}"
+                    remember_order(idem_key, order_id)
+                    status, body = 200, {"order_id": order_id}
             elif self.path == "/metrics":
                 avg = (METRICS["latency_ms_sum"] / METRICS["requests_total"]
                        if METRICS["requests_total"] else 0.0)
@@ -131,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"checkout_errors_total {METRICS['errors_total']}\n"
                     "# TYPE checkout_latency_ms_avg gauge\n"
                     f"checkout_latency_ms_avg {avg:.2f}\n"
+                    "# TYPE checkout_recent_orders_cached gauge\n"
+                    f"checkout_recent_orders_cached {len(RECENT_ORDERS)}\n"
                 ).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
@@ -159,5 +196,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     log("INFO", "starting", port=PORT, redis_host=REDIS_HOST,
         error_rate=ERROR_RATE, latency_ms=LATENCY_MS,
-        fraud_check_url=FRAUD_CHECK_URL or None, fraud_check_timeout_ms=FRAUD_CHECK_TIMEOUT_MS)
+        fraud_check_url=FRAUD_CHECK_URL or None, fraud_check_timeout_ms=FRAUD_CHECK_TIMEOUT_MS,
+        idempotency_ttl_s=IDEMPOTENCY_TTL_S)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -33,7 +33,7 @@ patches:
         value:
           requests:
             cpu: 50m
-            memory: 40Mi
+            memory: 64Mi
           limits:
             cpu: 250m
-            memory: 44Mi
+            memory: 128Mi

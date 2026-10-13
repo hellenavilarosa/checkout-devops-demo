@@ -36,4 +36,4 @@ patches:
             memory: 64Mi
           limits:
             cpu: 250m
-            memory: 128Mi
+            memory: 56Mi

@@ -17,14 +17,15 @@ spec:
       containers:
         - name: loadgen
           image: curlimages/curl:8.10.1
-          # ~5 req/s against /checkout; prints a one-line status summary per request
+          # ~5 req/s against /checkout; prints status and response time per request
+          # (status=000 means the client gave up: connection refused/reset or timeout)
           command:
             - /bin/sh
             - -c
             - |
               while true; do
-                code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://checkout-api/checkout || echo 000)
-                echo "$(date -u +%FT%TZ) checkout status=$code"
+                out=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 5 http://checkout-api/checkout || echo "000 5.0")
+                echo "$(date -u +%FT%TZ) checkout status=${out%% *} time=${out##* }s"
                 sleep 0.2
               done
           resources:

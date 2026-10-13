@@ -12,6 +12,11 @@ injected through Git / ArgoCD instead of kubectl):
   ERROR_RATE   0.0-1.0 fraction of /checkout calls that fail with 500
   LATENCY_MS   artificial latency added to every /checkout call
   APP_VERSION  echoed in logs and headers
+  FRAUD_CHECK_URL         optional fraud-scoring endpoint called before each
+                          checkout; empty = disabled
+  FRAUD_CHECK_TIMEOUT_MS  timeout for the fraud call (default 3000); on timeout
+                          or error the checkout proceeds (fail-open) and a
+                          WARN record with fraud_check="timeout" is logged
 
 Logs are one JSON object per line so CloudWatch metric filters can key on
 `level` and `status`.
@@ -23,6 +28,8 @@ import random
 import socket
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -32,6 +39,8 @@ ERROR_RATE = float(os.getenv("ERROR_RATE", "0"))
 LATENCY_MS = int(os.getenv("LATENCY_MS", "0"))
 APP_VERSION = os.getenv("APP_VERSION", "dev")
 PORT = int(os.getenv("PORT", "8080"))
+FRAUD_CHECK_URL = os.getenv("FRAUD_CHECK_URL", "").strip()
+FRAUD_CHECK_TIMEOUT_MS = int(os.getenv("FRAUD_CHECK_TIMEOUT_MS", "3000"))
 
 # Simple in-process counters exposed on /metrics
 METRICS = {"requests_total": 0, "errors_total": 0, "latency_ms_sum": 0.0}
@@ -59,6 +68,21 @@ def redis_cmd(*args, timeout=1.0):
     return data[1:].strip().decode()
 
 
+def fraud_score(request_id):
+    """Call the fraud-scoring service. Fail-open: any error or timeout lets the
+    checkout proceed, so a slow upstream shows up as latency, not as errors."""
+    if not FRAUD_CHECK_URL:
+        return "disabled", 0.0
+    t0 = time.time()
+    req = urllib.request.Request(FRAUD_CHECK_URL, headers={"X-Request-Id": request_id})
+    try:
+        with urllib.request.urlopen(req, timeout=FRAUD_CHECK_TIMEOUT_MS / 1000.0) as resp:
+            resp.read(256)
+        return "ok", (time.time() - t0) * 1000
+    except (urllib.error.URLError, OSError, ValueError):
+        return "timeout", (time.time() - t0) * 1000
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "checkout-api/" + APP_VERSION
 
@@ -79,6 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         request_id = str(uuid.uuid4())
         start = time.time()
         status, body = 404, {"error": "not found"}
+        extra = {}
         try:
             if self.path == "/ready":
                 # process-level readiness: the server is up and accepting connections
@@ -91,6 +116,9 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(LATENCY_MS / 1000.0)
                 if random.random() < ERROR_RATE:
                     raise RuntimeError("payment provider timeout")
+                fraud, fraud_ms = fraud_score(request_id)
+                if fraud != "disabled":
+                    extra = {"fraud_check": fraud, "fraud_ms": round(fraud_ms, 1)}
                 order_no = redis_cmd("INCR", "orders:total")
                 status, body = 200, {"order_id": f"ORD-{int(order_no):08d}"}
             elif self.path == "/metrics":
@@ -121,12 +149,15 @@ class Handler(BaseHTTPRequestHandler):
         if status >= 500:
             METRICS["errors_total"] += 1
         self._send(status, body, request_id)
-        log("ERROR" if status >= 500 else "INFO", "request",
+        level = "ERROR" if status >= 500 else ("WARN" if extra.get("fraud_check") == "timeout" else "INFO")
+        log(level, "request",
             path=self.path, status=status, latency_ms=round(elapsed_ms, 1),
-            request_id=request_id, **({"error": body.get("error")} if status >= 500 else {}))
+            request_id=request_id, **extra,
+            **({"error": body.get("error")} if status >= 500 else {}))
 
 
 if __name__ == "__main__":
     log("INFO", "starting", port=PORT, redis_host=REDIS_HOST,
-        error_rate=ERROR_RATE, latency_ms=LATENCY_MS)
+        error_rate=ERROR_RATE, latency_ms=LATENCY_MS,
+        fraud_check_url=FRAUD_CHECK_URL or None, fraud_check_timeout_ms=FRAUD_CHECK_TIMEOUT_MS)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
